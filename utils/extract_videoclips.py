@@ -16,7 +16,7 @@ def get_video_metadata(raw_video_dir):
             print(f"Video metadata for {source_video_filepath} already exists at {source_csv_filepath}, skipping extraction.")
         else:
             subprocess.run(f"ffprobe -select_streams v:0 -show_frames -print_format csv {source_video_filepath} > {source_csv_filepath}", shell=True)
-
+        # ffprobe -select_streams v:0 -show_frames -print_format csv data/videoclips/P1/P1S1.mp4 > data/P1S1_meta.csv
 
 def get_trial_metadata(raw_video_dir, source_video_name, vr_data_dir, pid, start, forward=None, start_sid=None):
     vr_file = glob.glob(f"{vr_data_dir}/P{pid}_*")

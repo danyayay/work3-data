@@ -1,4 +1,6 @@
 import numpy as np
+import pandas as pd
+
 
 def ypr_to_R_RH_ZYX(yaw_deg, pitch_deg, roll_deg): # rotation in z, y, x
     y, p, r = np.deg2rad([yaw_deg, pitch_deg, roll_deg])
@@ -18,7 +20,7 @@ def ypr_to_R_LH_ZYX(yaw_deg, pitch_deg, roll_deg):
 def project_LH_pure(Pw, Cw, yaw_deg, pitch_deg, roll_deg, fx, fy, cx, cy):
     Rlh = ypr_to_R_LH_ZYX(yaw_deg, pitch_deg, roll_deg)  # cam->world (LH)
     Pc = Rlh.T @ (Pw - Cw)  # world->cam (LH)
-    print(Rlh.T)
+    # print(Rlh.T)
     X, Y, Z = Pc
     # print('\nray:', Pw - Cw)
     # print(f'Pc: {Pc}\n')
@@ -36,7 +38,7 @@ def project_LH_pure(Pw, Cw, yaw_deg, pitch_deg, roll_deg, fx, fy, cx, cy):
     v = fy*((Z)/X) + cy  # note the -Y
     # u = fx*(Y/X) + cx
     # v = fy*((Z)/X) + cy  # note the -Y
-    print(u-cx, v-cy)
+    # print(u-cx, v-cy)
     return u, v
 
 ## hit on neighbor
@@ -49,7 +51,7 @@ def project_LH_pure(Pw, Cw, yaw_deg, pitch_deg, roll_deg, fx, fy, cx, cy):
 # yaw_deg = -150.853806
 # pitch_deg = -1.386804
 # roll_deg = 3.028832
-# yaw_deg *= -1
+# yaw_deg *= -1 # as the recorded rotation is not in conventional frame
 
 ## hit on pod 
 # Cw = np.array([-16528.275664, 171.054235, 147.805756]) / 100
@@ -63,12 +65,12 @@ def project_LH_pure(Pw, Cw, yaw_deg, pitch_deg, roll_deg, fx, fy, cx, cy):
 # pitch_deg = -pitch_deg
 
 ## hit on goal
-Cw = np.array([-16704.950546, 1.634704, 144.808823]) / 100  
-Pw = np.array([-16966.491998, -252.045056, 2.7125]) / 100
-yaw_deg = -151.537933
-pitch_deg = -10.921031
-roll_deg = 6.607353
-yaw_deg *= -1
+# Cw = np.array([-16704.950546, 1.634704, 144.808823]) / 100  
+# Pw = np.array([-16966.491998, -252.045056, 2.7125]) / 100
+# yaw_deg = -151.537933
+# pitch_deg = -10.921031
+# roll_deg = 6.607353
+# yaw_deg *= -1 
 
 
 ## test
@@ -77,41 +79,98 @@ yaw_deg *= -1
 # yaw_deg = -45
 # pitch_deg = 0
 # roll_deg = 0
-# TODO: careful whether the deg in our data follow the right-handed frame rotation rules
 
-fov_h = 107.21
-fov_v = 107.82
-width = 2880
-height = 1600
-fx = (width/2) / np.tan(np.deg2rad(fov_h)/2)
-fy = (height/2) / np.tan(np.deg2rad(fov_v)/2)
-cx = width / 2
-cy = height / 2
-projected = project_LH_pure(Pw, Cw, yaw_deg, pitch_deg, roll_deg, fx, fy, cx, cy)
-print("projected raw:", projected)
 
-if projected is not None:
-    width_cap = 1536
-    height_cap = 1068
-    u_cap = projected[0] * (width_cap / width)
-    v_cap = projected[1] * (height_cap / height)
-    print("projected in capture:", (u_cap, v_cap))
+# fov_h = 107.21
+# fov_v = 107.82
+# width = 2880
+# height = 1600
+# fx = (width/2) / np.tan(np.deg2rad(fov_h)/2)
+# fy = (height/2) / np.tan(np.deg2rad(fov_v)/2)
+# cx = width / 2
+# cy = height / 2
+# projected = project_LH_pure(Pw, Cw, yaw_deg, pitch_deg, roll_deg, fx, fy, cx, cy)
+# print("projected raw:", projected)
 
-# camera_forward_local = np.array([1, 0, 0])  # change to [1,0,0] if your camera looks along its +X
+# if projected is not None:
+#     width_cap = 1536
+#     height_cap = 1068
+#     u_cap = width_cap - projected[0] * (width_cap / width)
+#     v_cap = height_cap - projected[1] * (height_cap / height)
+#     print("projected in capture:", (u_cap, v_cap))
 
-# # build cam->world rotation using the same ypr function used for projection
-# R_cam2world = ypr_to_R_LH_ZYX(yaw_deg, pitch_deg, roll_deg)  # or ypr_to_R_RH_ZYX depending on which project_* you use
-# print('R_cam2world:\n', R_cam2world)
-# forward_world = R_cam2world.T @ camera_forward_local
 
-# # pick a point 1 unit in front of camera along optical axis
-# Pw_test = Cw + forward_world * 1.0
+if __name__ == "__main__":
 
-# print("camera_forward_local:", camera_forward_local)
-# print("forward_world:", forward_world)
-# print("test world point Pw_test:", Pw_test)
+    csv_filepath = 'data/vrdata/combined/P1_20241217103615516.csv'
+    df_p = pd.read_csv(csv_filepath)
+    sid = '3'
+    df_ps = df_p[df_p['Scenario'] == sid]
+    Cw = df_ps[['Ped_Location_x', 'Ped_Location_y', 'Ped_Location_z']].to_numpy() / 100
+    Pw = df_ps[['HitLocation_x', 'HitLocation_y', 'HitLocation_z']].to_numpy() / 100
+    yaw_deg = df_ps[['Ped_Rotation_z']].to_numpy().flatten() * -1
+    pitch_deg = df_ps[['Ped_Rotation_y']].to_numpy().flatten()
+    roll_deg = df_ps[['Ped_Rotation_x']].to_numpy().flatten()
 
-# # project using your projection function (adjust if you use LH vs RH variant)
-# proj = project_LH_pure(Pw_test, Cw, yaw_deg, pitch_deg, roll_deg, fx, fy, cx, cy)
-# print("projected (u,v) of forward test:", proj)
-# expected: a point on optical axis should project near (cx, cy) if inside FOV
+    fov_h = 107.21
+    fov_v = 107.82
+    width = 2880
+    height = 1600
+    fx = (width/2) / np.tan(np.deg2rad(fov_h)/2)
+    fy = (height/2) / np.tan(np.deg2rad(fov_v)/2)
+    cx = width / 2
+    cy = height / 2
+
+    xs = []
+    ys = []
+    us = []
+    vs = []
+    for i in range(len(Cw)):
+        # print(f"--- point {i} ---")
+        projected = project_LH_pure(Pw[i], Cw[i], yaw_deg[i], pitch_deg[i], roll_deg[i], fx, fy, cx, cy)
+        # print("projected raw:", projected)
+        xs.append(projected[0] if projected is not None else np.nan)
+        ys.append(projected[1] if projected is not None else np.nan)
+
+        if projected is not None:
+            width_cap = 1536
+            height_cap = 1068
+            u_cap = width_cap - projected[0] * (width_cap / width)
+            v_cap = height_cap - projected[1] * (height_cap / height)
+            # print("projected in capture:", (u_cap, v_cap))
+            us.append(u_cap)
+            vs.append(v_cap)
+        else:
+            us.append(np.nan)
+            vs.append(np.nan)
+    df_ps.loc[:, ['px_x']] = xs
+    df_ps.loc[:, ['px_y']] = ys
+    df_ps.loc[:, ['px_u']] = us
+    df_ps.loc[:, ['px_v']] = vs
+    df_ps.loc[:, ['timestamp']] = df_ps['TimeElapsed'] - df_ps['TimeElapsed'].iloc[0]
+    df_ps.to_csv(f'data/P1S{sid}_vr.csv', index=False)
+    
+    # get the eye gaze in a frame
+    df_vr = df_ps[['timestamp', 'px_x', 'px_y', 'px_u', 'px_v', 'Ped_Rotation_x', 'Ped_Rotation_y', 'Ped_Rotation_z']]
+    df_meta = pd.read_csv(f'data/P1S{sid}_meta.csv', header=None)
+    df_meta = df_meta.iloc[:, [5]]
+    df_meta = df_meta.rename(columns={5: 'timestamp'})
+    merged = pd.merge_asof(
+        df_meta,
+        df_vr,
+        on='timestamp',
+        direction='nearest'  # can also use 'backward' or 'forward'
+    )
+
+    # get the distance in the frame
+    df_diff = df_ps[['timestamp']]
+    df_diff.loc[:, ['dx']] = (df_ps['Ped_Location_x'] - df_ps['PodLeader_Location_x']) / 100 # turn to meters
+    df_diff.loc[:, ['dy']] = (df_ps['Ped_Location_y'] - df_ps['PodLeader_Location_y']) / 100 # turn to meters
+    df_diff_interp = df_diff.set_index('timestamp')
+    df_diff_interp = pd.concat([df_diff_interp, pd.DataFrame(index=merged['timestamp'])])
+    df_diff_interp = df_diff_interp[~df_diff_interp.index.duplicated(keep='first')]
+    df_diff_interp.sort_index(inplace=True)
+    df_diff_interp = df_diff_interp.interpolate(method='index')
+    merged = pd.merge(merged, df_diff_interp.reset_index(), on='timestamp')
+
+    merged.to_csv(f'data/P1S{sid}_merged.csv', index=False)
