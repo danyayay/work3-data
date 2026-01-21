@@ -12,12 +12,24 @@ import torch
 import numpy as np
 import torch.nn as nn
 from torch.utils.data import DataLoader, random_split
+import datetime
+import tempfile
+import shutil
+import json
+import subprocess
+
+# optional optuna import for hyperparameter tuning
+try:
+    import optuna
+except Exception:
+    optuna = None
 
 from models.fusion import EgocentricFusionTransformer, SimpleCNNBackbone
 from models.fusion_slim import SlimFusionTransformer
 from training.synthetic_dataset import SyntheticEgocentricDataset, collate_fn as synth_collate
 from training.scalers import compute_stats_from_dataloader, save_stats
 from torch.utils.data import Subset
+from utils.util import seed_everything
 
 # optional VR dataset import (may require opencv/pandas); import lazily below
 try:
@@ -27,13 +39,15 @@ except Exception:
     vr_collate = None
 
 
-def evaluate(model: nn.Module, loader: DataLoader, device: torch.device, backbone: Optional[nn.Module] = None):
+def evaluate(model: nn.Module, loader: DataLoader, device: torch.device, backbone: Optional[nn.Module] = None, loss_fn: Optional[nn.Module] = None):
     """Run evaluation and return (avg_loss, accuracy, class_metrics)
 
     class_metrics is a dict with keys 'precision','recall','f1' mapping to lists indexed by class id.
     """
     model.eval()
-    loss_fn = nn.CrossEntropyLoss()
+    # use provided loss_fn (with class weights) when available, else default
+    if loss_fn is None:
+        loss_fn = nn.CrossEntropyLoss()
     total_loss = 0.0
     total = 0
     all_preds = []
@@ -48,8 +62,11 @@ def evaluate(model: nn.Module, loader: DataLoader, device: torch.device, backbon
             motion = motion.to(device) if motion is not None else None
             goal = goal.to(device) if goal is not None else None
             if backbone is not None:
-                # vis expected (B,T,H,W,3) -> backbone returns (B,T,feat)
-                vis = backbone(vis)
+                # Only apply backbone if we received raw frames with 5 dims (B,T,H,W,3).
+                # Synthetic dataset provides per-frame embeddings (B,T,feat) so skip
+                # the backbone in that case.
+                if vis.dim() == 5:
+                    vis = backbone(vis)
             logits = model(vis, head_pose=pose, gaze=gaze, motion=motion, goal=goal)
             loss = loss_fn(logits, labels)
             total_loss += float(loss.item()) * labels.size(0)
@@ -114,7 +131,7 @@ def evaluate(model: nn.Module, loader: DataLoader, device: torch.device, backbon
         "macro": {"precision": macro_precision, "recall": macro_recall, "f1": macro_f1},
         "micro": {"precision": micro_precision, "recall": micro_recall, "f1": micro_f1},
     }
-    return avg_loss, accuracy, class_metrics
+    return avg_loss, accuracy, macro_f1, class_metrics
 
 
 def train(
@@ -122,6 +139,42 @@ def train(
     work_dir: Optional[str] = None,
 ) -> Dict[str, Any]:
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+    # timestamp for this run (used for saving model + logs)
+    timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+    log_lines = []
+    seed_everything(args.seed)
+
+    def _log(msg: str):
+        # print and accumulate for saving later
+        print(msg)
+        try:
+            log_lines.append(str(msg))
+        except Exception:
+            pass
+    
+    _log("Starting training with config:")
+    # _log(json.dumps(config, indent=4))
+    _log(json.dumps(config, separators=(",", ":"), sort_keys=True))
+
+    # determine run directory for artifacts. If the caller sets
+    # config['_no_timestamp_dir']=True then we will use the provided
+    # work_dir as-is (useful when run by Optuna where trial dirs are
+    # already timestamped). Otherwise create a timestamped subfolder
+    # under work_dir (when provided).
+    run_dir = None
+    if work_dir is not None:
+        if config.get('_no_timestamp_dir', False):
+            run_dir = work_dir
+        else:
+            run_dir = os.path.join(work_dir, timestamp)
+        os.makedirs(run_dir, exist_ok=True)
+        # save the config for reproducibility
+        try:
+            with open(os.path.join(run_dir, 'config.json'), 'w') as f:
+                json.dump(config, f, indent=4)
+        except Exception:
+            pass
 
     # dataset selection and visual encoder
     dataset_type = config.get("dataset_type", "synthetic")
@@ -134,8 +187,9 @@ def train(
             raise RuntimeError("VRDataset not available - missing optional dependencies (cv2/pandas) or import error")
         # import split_person_groups lazily so scripts that only use synthetic data
         # don't require OpenCV/pandas at module import time
-        from training.vr_dataset import split_person_groups
+        from training.vr_dataset import split_person_groups, split_person_testing
         data_split = split_person_groups(config["annotations_path"], config.get('seed'))
+        # data_split = split_person_testing(config["annotations_path"])
 
         train_ds = VRDataset(
             annotations_path=config["annotations_path"],
@@ -146,6 +200,7 @@ def train(
             pose_cols=config.get("pose_cols", None),
             gaze_cols=config.get("gaze_cols", None),
             motion_cols=config.get("motion_cols", None),
+            goal_cols=config.get("goal_cols", None),
             return_raw_frames=(visual_encoder != "pixels"),
             person_ids=data_split["train_persons"],
         )
@@ -158,6 +213,7 @@ def train(
             pose_cols=config.get("pose_cols", None),
             gaze_cols=config.get("gaze_cols", None),
             motion_cols=config.get("motion_cols", None),
+            goal_cols=config.get("goal_cols", None),
             return_raw_frames=(visual_encoder != "pixels"),
             person_ids=data_split["val_persons"],
         )
@@ -170,6 +226,7 @@ def train(
             pose_cols=config.get("pose_cols", None),
             gaze_cols=config.get("gaze_cols", None),
             motion_cols=config.get("motion_cols", None),
+            goal_cols=config.get("goal_cols", None),
             return_raw_frames=(visual_encoder != "pixels"),
             person_ids=data_split["test_persons"],
         )
@@ -222,8 +279,8 @@ def train(
     work_dir = work_dir or config.get("work_dir", None)
     try:
         stats = compute_stats_from_dataloader(train_loader)
-        if work_dir is not None:
-            save_stats(stats, work_dir)
+        if run_dir is not None:
+            save_stats(stats, run_dir)
 
         # helper to attach stats to dataset or Subset.dataset
         def _attach_stats(ds_obj, stats_dict):
@@ -257,7 +314,7 @@ def train(
             nhead=config.get("nhead", 8),
             num_layers=config.get("num_layers", 4),
             dim_feedforward=config.get("dim_feedforward", 512),
-            dropout=config.get("dropout", 0.1),
+            dropout=config.get("dropout", 0),
             n_classes=config.get("n_classes", 5),
             max_time_steps=config.get("max_time_steps", 64),
         ).to(device)
@@ -278,6 +335,7 @@ def train(
         ).to(device)
     else:
         raise ValueError(f"Unknown model type: {model_type}")
+    _log(model)
 
     # optional backbone for raw frames: SimpleCNN or CLIP
     backbone = None
@@ -296,11 +354,47 @@ def train(
     else:
         optimizer = torch.optim.AdamW(model.parameters(), lr=config.get("lr", 1e-4), weight_decay=1e-4)
     scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=10, gamma=0.5)
-    loss_fn = nn.CrossEntropyLoss()
 
+    # compute class weights from the training set to handle class imbalance
+    n_classes = int(config.get('n_classes', 5))
+    counts = np.zeros(n_classes, dtype=np.int64)
+    try:
+        for _vis, _pose, _gaze, _motion, _goal, labels in train_loader:
+            # labels can be a tensor
+            lbl = labels.cpu().numpy()
+            binc = np.bincount(lbl, minlength=n_classes)
+            counts[: len(binc)] += binc
+    except Exception:
+        # fallback to uniform counts if anything goes wrong
+        counts = np.ones(n_classes, dtype=np.int64)
+
+    total = int(counts.sum()) if counts.sum() > 0 else 0
+    if total == 0:
+        weights = np.ones(n_classes, dtype=np.float32)
+    else:
+        # inverse frequency, normalized by number of classes so mean weight ~=1
+        counts_safe = counts.copy().astype(np.float32)
+        counts_safe[counts_safe == 0] = 1.0
+        weights = total / (n_classes * counts_safe)
+        weights[counts == 0] = 0.0
+    # weights = [3.4, 1.0]
+    _log(f"weights: {weights}")
+    weights = torch.tensor(weights, dtype=torch.float32)
+    loss_fn = nn.CrossEntropyLoss(weight=weights.to(device))
+
+    # track bests for multiple metrics but monitor a single chosen eval metric
     best_val_acc = 0.0
+    best_val_macrof1 = 0.0
+    best_epoch = 0
     best_state = None
+    # the metric to monitor for model selection / early stopping: 'acc' or 'macro_f1'
+    monitored_metric = str(config.get('eval_metric', 'acc'))
+    # initialize best monitored value to a very small number so any real score is larger
+    best_monitored_value = -1.0
+
     epochs = int(config.get("epochs", 3))
+    patience = int(config.get('early_stop_patience', 20))
+    epochs_since_improve = 0
 
     for epoch in range(1, epochs + 1):
         model.train()
@@ -315,10 +409,11 @@ def train(
             goal = goal.to(device) if goal is not None else None
 
             optimizer.zero_grad()
-            if backbone is not None:
+            if backbone is not None and vis.dim() == 5:
                 # backbone expects (B,T,H,W,3)
                 vis_emb = backbone(vis)
             else:
+                # either no backbone configured or input is already embeddings
                 vis_emb = vis
             logits = model(vis_emb, head_pose=pose, gaze=gaze, motion=motion, goal=goal)
             loss = loss_fn(logits, labels)
@@ -328,22 +423,46 @@ def train(
             running_loss += float(loss.item()) * labels.size(0)
             running_samples += labels.size(0)
 
-        scheduler.step()
-        train_loss = running_loss / running_samples
-        val_loss, val_acc, val_metrics = evaluate(model, val_loader, device, backbone=backbone)
-        print(f"Epoch {epoch}/{epochs}: train_loss={train_loss:.4f} val_loss={val_loss:.4f} val_acc={val_acc:.4f}")
 
+            scheduler.step()
+            train_loss = running_loss / running_samples
+
+        val_loss, val_acc, val_macrof1, val_metrics = evaluate(model, val_loader, device, backbone=backbone, loss_fn=loss_fn)
+        _log(f"Epoch {epoch}/{epochs}: train_loss={train_loss:.4f} val_loss={val_loss:.4f} val_acc={val_acc:.4f} val_macrof1={val_macrof1:.4f}")
+
+        # choose which metric to use for model selection and early stopping
+        if monitored_metric in ("acc", "accuracy"):
+            current_monitored = float(val_acc)
+        else:
+            # 'macro_f1' expected
+            current_monitored = float(val_macrof1)
+
+        # always update secondary tracked metrics for reporting
         if val_acc > best_val_acc:
             best_val_acc = val_acc
-            best_state = model.state_dict()
+        if val_macrof1 > best_val_macrof1:
+            best_val_macrof1 = val_macrof1
 
-    print("Finished training. **best_val_acc**=", best_val_acc)
+        # update best according to the chosen monitored metric
+        if current_monitored > best_monitored_value:
+            best_monitored_value = current_monitored
+            best_epoch = epoch
+            best_state = model.state_dict()
+            epochs_since_improve = 0
+        else:
+            epochs_since_improve += 1
+
+        if epochs_since_improve >= patience:
+            _log(f"Early stopping: no improvement for {patience} epochs (stopping at epoch {epoch})")
+            break
+
+    _log(f"Finished training. **best_val_{monitored_metric}**= {best_monitored_value:.4f} at epoch {best_epoch}")
 
     # save best model
-    if work_dir is not None and best_state is not None:
-        os.makedirs(work_dir, exist_ok=True)
-        ckpt = os.path.join(work_dir, "best_fusion.pt")
-        torch.save({"state_dict": best_state, "config": config}, ckpt)
+    if run_dir is not None and best_state is not None:
+        ckpt = os.path.join(run_dir, f"best_fusion.pt")
+        torch.save({"state_dict": best_state, "config": config, "timestamp": timestamp}, ckpt)
+        _log(f"Saved best model to {ckpt}")
 
     # Evaluate on test set. If we have a saved best_state, load it for final evaluation.
     if best_state is not None:
@@ -353,8 +472,9 @@ def train(
             # in case of mismatch, ignore and use final weights
             pass
 
-    test_loss, test_acc, test_metrics = evaluate(model, test_loader, device, backbone=backbone)
-    print(f"\nTest: test_loss={test_loss:.4f}, test_acc={test_acc:.4f}, test_macrof1={np.mean(test_metrics['f1']):.4f}")
+    # evaluate test metrics
+    test_loss, test_acc, test_macrof1, test_metrics = evaluate(model, test_loader, device, backbone=backbone, loss_fn=loss_fn)
+    _log(f"\nTest: test_loss={test_loss:.4f}, test_acc={test_acc:.4f}, test_macrof1={test_macrof1:.4f}")
 
     # Nicely print per-class metrics
     precs = test_metrics.get("precision", [])
@@ -364,22 +484,21 @@ def train(
     ncls = len(precs)
     if ncls > 0:
         header = f"{'class':>5} {'precision':>10} {'recall':>10} {'f1':>10} {'support':>8}"
-        print("\nPer-class metrics:")
-        print(header)
-        print("-" * len(header))
+        _log("\nPer-class metrics:")
+        _log(header)
+        _log("-" * len(header))
         for c in range(ncls):
-            print(f"{c:5d} {precs[c]:10.4f} {recs[c]:10.4f} {f1s[c]:10.4f} {supports[c]:8d}")
+            _log(f"{c:5d} {precs[c]:10.4f} {recs[c]:10.4f} {f1s[c]:10.4f} {supports[c]:8d}")
         # macro & micro
         macro = test_metrics.get("macro", {})
         micro = test_metrics.get("micro", {})
-        print("\nAverages:")
-        print(f"macro - precision: {macro.get('precision',0.0):.4f}, recall: {macro.get('recall',0.0):.4f}, f1: {macro.get('f1',0.0):.4f}")
-        print(f"micro - precision: {micro.get('precision',0.0):.4f}, recall: {micro.get('recall',0.0):.4f}, f1: {micro.get('f1',0.0):.4f}")
+        _log("\nAverages:")
+        _log(f"macro - precision: {macro.get('precision',0.0):.4f}, recall: {macro.get('recall',0.0):.4f}, f1: {macro.get('f1',0.0):.4f}")
+        _log(f"micro - precision: {micro.get('precision',0.0):.4f}, recall: {micro.get('recall',0.0):.4f}, f1: {micro.get('f1',0.0):.4f}")
 
-    # save test metrics to work_dir if provided
-    if work_dir is not None:
-        os.makedirs(work_dir, exist_ok=True)
-        metrics_path = os.path.join(work_dir, "test_metrics.txt")
+    # save test metrics to run_dir if provided
+    if run_dir is not None:
+        metrics_path = os.path.join(run_dir, "test_metrics.txt")
         try:
             with open(metrics_path, "w") as f:
                 f.write(f"test_loss {test_loss}\n")
@@ -394,35 +513,298 @@ def train(
         except Exception:
             pass
 
-    return {"best_val_acc": best_val_acc, "test_loss": test_loss, "test_acc": test_acc, "test_metrics": test_metrics, "config": config}
+    # save training log
+    if run_dir is not None:
+        try:
+            log_path = os.path.join(run_dir, f"training_log.txt")
+            with open(log_path, "w") as f:
+                for l in log_lines:
+                    f.write(str(l) + "\n")
+            _log(f"Saved training log to {log_path}")
+        except Exception:
+            pass
+
+    return {
+        "best_val_acc": best_val_acc,
+        "val_loss": val_loss,
+        "val_acc": val_acc,
+        "val_macrof1": val_macrof1,
+        "val_metrics": val_metrics,
+        "test_loss": test_loss,
+        "test_acc": test_acc,
+        "test_macrof1": test_macrof1,
+        "test_metrics": test_metrics,
+        # include monitored metric and its name so callers (e.g., Optuna) can use it
+        "monitored_metric": monitored_metric,
+        "best_monitored": best_monitored_value,
+        "config": config,
+    }
 
 
 def parse_args():
     parser = argparse.ArgumentParser()
     parser.add_argument("--seed", type=int, default=42)
-    parser.add_argument("--epochs", type=int, default=10)
+    parser.add_argument("--epochs", type=int, default=100)
     parser.add_argument("--num-samples", type=int, default=400)
     parser.add_argument("--batch-size", type=int, default=32)
-    parser.add_argument("--T", type=int, default=60)
+    parser.add_argument("--T", type=int, default=30)
     parser.add_argument("--d-model", type=int, default=128)
-    parser.add_argument("--lr", type=float, default=1e-3)
+    parser.add_argument("--lr", type=float, default=1e-4)
+
     parser.add_argument("--work-dir", type=str, default="./outputs")
     parser.add_argument("--dataset-type", type=str, default="vr", choices=["synthetic", "vr"]) 
     parser.add_argument("--annotations", type=str, default='../data/features/annotations.VRmulti_test_close.json', help="Path to annotations JSON for VR dataset")
+    parser.add_argument("--n-classes", type=int, default=2, help="Number of classes")
     parser.add_argument("--videos-dir", type=str, default='../data/vrvideo_256/clips', help="Root directory of video clips for VR dataset")
     parser.add_argument("--vrdata-dir", type=str, default='../data/vrdata', help="Directory with per-video CSVs for head pose/gaze")
+    
     parser.add_argument("--frame-size", type=int, nargs=2, default=(32, 32), help="H W frame resize for VR dataset")
     parser.add_argument("--visual-encoder", type=str, default="simple", choices=["pixels", "simple", "clip"], help="Which visual encoder to use: flattened pixels, simple CNN, or pretrained CLIP")
+    
     parser.add_argument("--backbone-out-dim", type=int, default=256, help="Output embedding dim of backbone per frame")
     parser.add_argument("--backbone-hidden", type=int, default=64, help="Hidden channels for small CNN backbone")
+    # TODO: model=clip option still fails
     parser.add_argument("--clip-model", type=str, default="ViT-B/32", help="CLIP model name to load if --visual-encoder clip")
-    parser.add_argument("--freeze-clip", action="store_true", help="Freeze CLIP backbone weights")
+    parser.add_argument("--freeze-clip", action="store_true", default=True, help="Freeze CLIP backbone weights")
+    
+    parser.add_argument("--no-extra-modalities", action="store_true", default=True, help="Disable pose/gaze/motion/goal modalities and use only egocentric video") 
     parser.add_argument("--pose-cols", type=str, nargs="*", default=["rot_x","rot_y","rot_z"], help="CSV columns for head pose")
-    parser.add_argument("--gaze-cols", type=str, nargs="*", default=["gaze_x","gaze_y"], help="CSV columns for gaze")
+    parser.add_argument("--gaze-cols", type=str, nargs="*", default=["px_u","px_v"], help="CSV columns for gaze")
     parser.add_argument("--motion-cols", type=str, nargs="*", default=["Ped_Location_x_smoothed","Ped_Location_y_smoothed"], help="CSV columns for past body-frame motion")
+    parser.add_argument("--goal-cols", type=str, nargs="*", default=["goal"], help="CSV columns for goal location") 
     parser.add_argument("--motion-dim", type=int, default=2, help="Dimensionality of motion features per timestep")
+    
     parser.add_argument("--model", type=str, default="fusion", choices=["fusion", "slim"], help="Which model to use: 'fusion' (original) or 'slim' (lightweight)")
+    parser.add_argument("--early-stop-patience", type=int, default=20, help="Early stopping patience in epochs (default 20)")
+    parser.add_argument("--eval-metric", type=str, default="macro_f1", choices=["acc", "macro_f1"], help="Evaluation metric to monitor for model selection and early stopping")
+    
+    # Optuna hyperparameter tuning flags
+    parser.add_argument("--hp-tune", action="store_true", default=True, help="Run Optuna hyperparameter tuning instead of a single training run")
+    parser.add_argument("--hp-trials", type=int, default=100, help="Number of Optuna trials to run")
+    parser.add_argument("--hp-keep-checkpoints", action="store_true", help="Keep per-trial checkpoints/artifacts (default: remove them)")
+    parser.add_argument("--hp-dashboard", action="store_true", default=True, help="Launch optuna-dashboard for live visualization (requires optuna-dashboard installed)")
+    parser.add_argument("--hp-dashboard-port", type=int, default=8080, help="Port for optuna-dashboard (default 8080)")
+    parser.add_argument("--hp-dashboard-host", type=str, default="127.0.0.1", help="Host for optuna-dashboard (default 127.0.0.1)")
+    
     return parser.parse_args()
+
+
+def run_optuna(base_cfg: Dict[str, Any], args) -> Optional[object]:
+    """Run an Optuna study using the training function as the objective.
+
+    Each trial runs train(...) for a small number of epochs in a temporary
+    work directory. The best trial params are written to base_cfg['work_dir']
+    (if provided).
+    """
+    if optuna is None:
+        raise RuntimeError("Optuna is not installed. Install it with 'pip install optuna' to use --hp-tune.")
+
+    # create a timestamped study directory to collect all artifacts
+    study_ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+    base_work = base_cfg.get('work_dir') or args.work_dir or os.getcwd()
+    study_dir = os.path.join(base_work, f"{study_ts}_optuna")
+    os.makedirs(study_dir, exist_ok=True)
+
+    def _objective(trial) -> float:
+        cfg = dict(base_cfg)
+        # sample hyperparameters
+        cfg['lr'] = trial.suggest_float('lr', 1e-5, 1e-3)
+        cfg['d_model'] = int(trial.suggest_categorical('d_model', [64, 128, 192, 256]))
+        # choose nhead that divides d_model
+        possible_heads = [1, 2, 4, 8, 16]
+        valid_heads = [h for h in possible_heads if cfg['d_model'] % h == 0 and h <= cfg['d_model']]
+        if len(valid_heads) == 0:
+            valid_heads = [1]
+        cfg['nhead'] = int(trial.suggest_categorical('nhead', valid_heads))
+        cfg['num_layers'] = int(trial.suggest_int('num_layers', 1, 4))
+        # sample feedforward size via a fixed categorical choice to keep the
+        # distribution static across trials (avoids Optuna storage compatibility errors)
+        ff_choice = trial.suggest_categorical('ff_choice', ['d2', 'd4', '512'])
+        if ff_choice == '512':
+            cfg['dim_feedforward'] = 512
+        elif ff_choice == 'd2':
+            cfg['dim_feedforward'] = int(cfg['d_model'] * 2)
+        else:
+            cfg['dim_feedforward'] = int(cfg['d_model'] * 4)
+        cfg['dropout'] = float(trial.suggest_float('dropout', 0.0, 0.3))
+        cfg['batch_size'] = int(trial.suggest_categorical('batch_size', [16, 32, 64]))
+        resize_size = int(trial.suggest_categorical('resize_size', [32, 64, 128, 224]))
+        cfg['frame_size'] = (resize_size, resize_size)
+
+        # keep trials short and small dataset size
+        cfg['epochs'] = args.epochs
+        if args.dataset_type == 'synthetic':
+            cfg['num_samples'] = int(min(base_cfg.get('num_samples', 500), 400))
+        cfg['seed'] = args.seed
+
+        cfg['T'] = trial.suggest_categorical('T', [8, 16, 30, 60])
+        cfg['visual_encoder'] = args.visual_encoder
+        if args.visual_encoder != 'pixels':
+            if args.visual_encoder == 'simple':
+                cfg['backbone_out_dim'] = int(trial.suggest_int('backbone_out_dim', 64, 256))
+                cfg['backbone_hidden'] = int(trial.suggest_int('backbone_hidden', 32, 128))
+            elif args.visual_encoder == 'clip':
+                cfg['clip_model'] = args.clip_model
+                cfg['freeze_clip'] = args.freeze_clip
+
+        cfg['model'] = trial.suggest_categorical('model', ['fusion', 'slim'])
+
+        # create a per-trial directory under the study dir so that all logs
+        # and checkpoints from trials are retained in a single timestamped
+        # folder. We set a flag so train() will not create an extra timestamp
+        # subfolder.
+        trial_dir = os.path.join(study_dir, 'trials', f"trial_{trial.number}")
+        os.makedirs(trial_dir, exist_ok=True)
+        cfg['_no_timestamp_dir'] = True
+        try:
+            result = train(cfg, work_dir=trial_dir)
+            # capture metrics for Optuna reporting and later analysis
+            # prefer the new 'best_monitored' key (monitored metric), fall back to best_val_acc
+            val_score = float(result.get('best_monitored', result.get('best_val_acc', 0.0)))
+            # attach these to trial user attrs
+            try:
+                # record the metric that was monitored for this trial
+                trial.set_user_attr('monitored_metric', result.get('monitored_metric', cfg.get('eval_metric', 'acc')))
+                trial.set_user_attr('val_acc', float(result.get('val_acc', 0.0)))
+                trial.set_user_attr('val_macrof1', result.get('val_macrof1', 0.0))
+                trial.set_user_attr('test_acc', float(result.get('test_acc', 0.0)))
+                trial.set_user_attr('test_macrof1', result.get('test_macrof1', 0.0))
+            except Exception:
+                pass
+        except Exception as e:  # pragma: no cover - avoid crashing the study
+            print(f"Trial crashed: {e}")
+            val_score = 0.0
+        finally:
+            # do not remove trial_dir; we keep all artifacts inside study_dir
+            # so the user can inspect them after tuning.
+            pass
+
+        return val_score
+
+    # use a sqlite storage so the study can be inspected with optuna-dashboard
+    storage_path = os.path.join(study_dir, 'optuna_study.db')
+    storage_url = f"sqlite:///{storage_path}"
+    sampler = optuna.samplers.TPESampler(seed=args.seed)
+    study = optuna.create_study(direction='maximize', sampler=sampler, storage=storage_url, load_if_exists=True, study_name='egocentric')
+
+    # initialize with a good start
+    initial_params = {
+        'lr': 1e-4,
+        'd_model': 128,
+        'nhead': 8,
+        'num_layers': 4,
+        'dropout': 0,
+        'batch_size': 32,
+        'resize_size': 32,
+        'T': 30,
+        'model': 'fusion',
+        'backbone_hidden': 64,
+        'backbone_out_dim': 256,
+    }
+    study.enqueue_trial(initial_params)
+
+    # optionally launch optuna-dashboard for live visualization
+    dashboard_proc = None
+    if getattr(args, 'hp_dashboard', False):
+        # prefer the optuna-dashboard executable if available
+        dashboard_cmd = shutil.which('optuna-dashboard')
+        if dashboard_cmd is None:
+            dashboard_cmd = shutil.which('optuna_dashboard')
+        if dashboard_cmd is None:
+            _msg = "optuna-dashboard binary not found in PATH; please install optuna-dashboard to use --hp-dashboard"
+            print(_msg)
+            try:
+                with open(os.path.join(study_dir, 'dashboard_info.txt'), 'w') as f:
+                    f.write(_msg + "\n")
+            except Exception:
+                pass
+        else:
+            host = getattr(args, 'hp_dashboard_host', '127.0.0.1')
+            port = int(getattr(args, 'hp_dashboard_port', 8080))
+            cmd = [dashboard_cmd, storage_url, '--host', host, '--port', str(port)]
+            logf = open(os.path.join(study_dir, 'dashboard.log'), 'w')
+            try:
+                dashboard_proc = subprocess.Popen(cmd, stdout=logf, stderr=logf)
+                with open(os.path.join(study_dir, 'dashboard_info.txt'), 'w') as f:
+                    f.write(f"dashboard_pid: {dashboard_proc.pid}\n")
+                    f.write(f"url: http://{host}:{port}/\n")
+            except Exception as e:
+                print(f"Failed to launch optuna-dashboard: {e}")
+
+    try:
+        study.optimize(_objective, n_trials=args.hp_trials)
+    finally:
+        # if we launched a dashboard process, terminate it now
+        if dashboard_proc is not None:
+            try:
+                dashboard_proc.terminate()
+            except Exception:
+                pass
+
+    # save best params and trials into study_dir
+    best = study.best_trial
+    try:
+        best_entry = {'value': best.value, 'params': best.params}
+        # include any user attrs recorded during the objective
+        try:
+            best_entry['user_attrs'] = best.user_attrs
+        except Exception:
+            best_entry['user_attrs'] = {}
+        with open(os.path.join(study_dir, 'optuna_best_params.json'), 'w') as f:
+            json.dump(best_entry, f, indent=4)
+    except Exception:
+        pass
+
+    try:
+        df = study.trials_dataframe()
+        df.to_csv(os.path.join(study_dir, 'optuna_trials.csv'), index=False)
+    except Exception:
+        # if pandas not available or conversion fails, fallback to writing simple text
+        try:
+            with open(os.path.join(study_dir, 'optuna_trials.txt'), 'w') as f:
+                for t in study.trials:
+                    f.write(str({'number': t.number, 'value': t.value, 'params': t.params}) + "\n")
+        except Exception:
+            pass
+
+    # write a detailed per-trial CSV that includes user_attrs (val_macrof1, test metrics)
+    try:
+        import csv
+        detailed_path = os.path.join(study_dir, 'optuna_trials_detailed.csv')
+        with open(detailed_path, 'w', newline='') as csvfile:
+            fieldnames = ['number', 'value', 'params', 'monitored_metric', 'val_monitored', 'val_macrof1', 'test_acc', 'test_macrof1']
+            writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
+            writer.writeheader()
+            for t in study.trials:
+                ua = getattr(t, 'user_attrs', {}) if hasattr(t, 'user_attrs') else {}
+                row = {
+                    'number': t.number,
+                    'value': t.value,
+                        'params': t.params,
+                        'monitored_metric': ua.get('monitored_metric', ''),
+                        'val_monitored': ua.get('val_monitored', ''),
+                        'val_macrof1': ua.get('val_macrof1', ''),
+                        'test_acc': ua.get('test_acc', ''),
+                        'test_macrof1': ua.get('test_macrof1', ''),
+                }
+                writer.writerow(row)
+    except Exception:
+        pass
+
+    # write a human-readable summary
+    try:
+        summary_path = os.path.join(study_dir, 'optuna_summary.txt')
+        with open(summary_path, 'w') as f:
+            f.write(f"Optuna study summary - best value: {best.value}\n")
+            f.write(f"Best params: {best.params}\n\n")
+            f.write("Trials:\n")
+            for t in study.trials:
+                f.write(f"#%d value={t.value} params={t.params}\n" % t.number)
+    except Exception:
+        pass
+
+    print(f"Optuna study finished. Best value: {best.value}, params: {best.params}. Artifacts in {study_dir}")
+    return study
 
 
 if __name__ == "__main__":
@@ -445,11 +827,24 @@ if __name__ == "__main__":
         "backbone_hidden": args.backbone_hidden,
         "clip_model": args.clip_model,
         "freeze_clip": args.freeze_clip,
-        "pose_cols": args.pose_cols,
-        "gaze_cols": args.gaze_cols,
-        "motion_cols": args.motion_cols,
-        "motion_dim": args.motion_dim,
-    "model": args.model,
-        
+        "pose_cols": [] if args.no_extra_modalities else args.pose_cols,
+        "gaze_cols": [] if args.no_extra_modalities else args.gaze_cols,
+        "motion_cols": [] if args.no_extra_modalities else args.motion_cols,
+        "goal_cols": [] if args.no_extra_modalities else args.goal_cols,
+        "motion_dim": 0 if args.no_extra_modalities else args.motion_dim,
+        "model": args.model,
+        "eval_metric": args.eval_metric,
+        "n_classes": args.n_classes,
+        "early_stop_patience": args.early_stop_patience,
     }
-    result = train(cfg, work_dir=args.work_dir)
+    if args.hp_tune:
+        # run Optuna tuning
+        study = run_optuna(cfg, args)
+        # after tuning, print best and exit
+        if study is not None:
+            best = study.best_trial
+            print("Optuna best:", best.number, best.value, best.params)
+        else:
+            print("Optuna did not run (optuna missing?)")
+    else:
+        result = train(cfg, work_dir=args.work_dir)

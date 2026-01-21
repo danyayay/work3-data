@@ -57,3 +57,31 @@ pip install --upgrade mmcv-full==2.2.0 -f https://download.openmmlab.com/mmcv/di
 
 <!-- To test  -->
 python -c "from mmseg.apis import init_model, inference_model"
+
+
+optuna-dashboard sqlite:///outputs/optuna_20260120_234115/optuna_study.db
+
+optuna-dashboard sqlite:///outputs/optuna_20260121_094048/optuna_study.db
+
+
+### need to change 
+problem = multi / binary 
+visual_encoder = pixels / simple / clip 
+features = use / not use additional numeric features
+
+python -m training.train_fusion --annotations '../data/features/annotations.VRmulti_test_close.json' --visual-encoder pixels --dataset-type vr --hp-trials 150
+
+python -m training.train_fusion --annotations '../data/features/annotations.VRmulti_test_close.json' --n-classes 5 --visual-encoder simple --dataset-type vr --hp-trials 100 --hp-dashboard-port 7070 
+
+python -m training.train_fusion --annotations '../data/features/annotations.VRmulti_test_close.json' --visual-encoder clip --dataset-type vr --hp-trials 150 --hp-dashboard-port 6060
+
+
+
+python -m training.train_fusion --annotations '../data/features/annotations.VRbin_test_close.json' --visual-encoder pixels --dataset-type vr --hp-trials 150 --hp-dashboard-port 1010
+
+python -m training.train_fusion --annotations '../data/features/annotations.VRbin_test_close.json' --visual-encoder simple --dataset-type vr --hp-trials 150 --hp-dashboard-port 2020
+
+python -m training.train_fusion --annotations '../data/features/annotations.VRbin_test_close.json' --visual-encoder clip --dataset-type vr --hp-trials 150 --hp-dashboard-port 3030
+
+
+python -m training.train_fusion --annotations '../data/features/annotations.VRbin_test_close.json' --visual-encoder simple --dataset-type vr --hp-trials 150 --hp-dashboard-port 2020

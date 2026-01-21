@@ -82,12 +82,17 @@ class VRDataset(Dataset):
         start_key_candidates = start_key_candidates or ["moment_start_frame"]
         end_key_candidates = end_key_candidates or ["moment_end_frame"]
 
-        # explicit preferred columns for pose/gaze
-        self.pose_cols = pose_cols or ["rot_x", "rot_y", "rot_z"]
-        # self.gaze_cols = gaze_cols or ["gaze_x", "gaze_y"]
-        self.gaze_cols = gaze_cols or ["px_u", "px_v"]
-        self.motion_cols = motion_cols or ["Ped_Location_x_smoothed", "Ped_Location_y_smoothed"]
-        self.goal_cols = goal_cols or ["goal"]
+        # store user-specified column configs (None means auto-detect, [] means disable)
+        self._user_pose_cols = True if len(pose_cols) > 0 else False
+        self._user_gaze_cols = True if len(gaze_cols) > 0 else False
+        self._user_motion_cols = True if len(motion_cols) > 0 else False
+        self._user_goal_cols = True if len(goal_cols) > 0 else False
+
+        self.pose_cols = pose_cols
+        self.gaze_cols = gaze_cols
+        self.motion_cols = motion_cols
+        self.goal_cols = goal_cols
+
         # optional scalers (dict with 'mean' and 'std' numpy arrays)
         self.pose_scaler = pose_scaler
         self.gaze_scaler = gaze_scaler
@@ -237,15 +242,30 @@ class VRDataset(Dataset):
         if df is not None:
             cols = df.columns.tolist()
             arr = df.values
-            gaze_cols = [c for c in cols if c in self.gaze_cols]
-            pose_cols = [c for c in cols if c in self.pose_cols]
-            motion_cols = [c for c in cols if c in self.motion_cols]
-            if len(gaze_cols) == 0:
-                gaze_cols = [c for c in cols if c.lower().startswith("gaze") or c.lower() in ("gx", "gy", "gaze_x", "gaze_y")]
-            if len(pose_cols) == 0:
+            # Determine which columns to use. Behavior:
+            # - if user passed None for a modality, try auto-detect from CSV columns
+            # - if user passed an empty list [], treat modality as disabled
+            # - if user passed an explicit list, use those column names
+            if self._user_gaze_cols is None:
+                gaze_cols = [c for c in cols if c.lower().startswith("gaze") or c.lower() in ("gx", "gy", "gaze_x", "gaze_y", "px_u", "px_v")]
+            elif len(self.gaze_cols) == 0:
+                gaze_cols = []
+            else:
+                gaze_cols = [c for c in cols if c in self.gaze_cols]
+
+            if self._user_pose_cols is None:
                 pose_cols = [c for c in cols if c.lower().startswith("head") or c.lower().startswith("pose") or c.lower() in ("px", "py", "pz", "rx", "ry", "rz")]
-            if len(motion_cols) == 0:
+            elif len(self.pose_cols) == 0:
+                pose_cols = []
+            else:
+                pose_cols = [c for c in cols if c in self.pose_cols]
+
+            if self._user_motion_cols is None:
                 motion_cols = [c for c in cols if c.lower().startswith("ped") and ("loc" in c.lower() or "location" in c.lower())]
+            elif len(self.motion_cols) == 0:
+                motion_cols = []
+            else:
+                motion_cols = [c for c in cols if c in self.motion_cols]
         else:
             arr = data
             ncols = arr.shape[1]
@@ -294,16 +314,21 @@ class VRDataset(Dataset):
                     if len(motion_idx) > 0:
                         motion = sampled[:, motion_idx]
 
-                # goal extraction: angle and distance
-                pid, sid = re.match(r'P(\d+)S(\d+)', os.path.basename(csv_path).split('.')[0]).groups()
-                angle = self.dt[(self.dt['pid'] == int(pid)) & (self.dt['sid'] == int(sid))]['angle'].values[0]
-                goal_deg_map = {0: -45.0, 1: -90.0, 2: -135.0}
-                goal_loc_map = {0: (150, -150), 1: (0, -150), 2: (-150, -150)}
-                dist_x = goal_loc_map[angle][0] - df.Ped_Location_x_smoothed.values
-                dist_y = goal_loc_map[angle][1] - df.Ped_Location_y_smoothed.values
-                dist_vals = np.sqrt(dist_x ** 2 + dist_y ** 2)[idxs]
-                angle_vals = (goal_deg_map[angle] - df.rot_z.values)[idxs]
-                goal_ts = np.concatenate([dist_vals[:, None], np.sin(angle_vals[:, None]), np.cos(angle_vals[:, None])], axis=1).astype(np.float32)
+                # goal extraction: angle and distance (only if goal modality enabled or auto)
+                if (self._user_goal_cols is None) or (len(self.goal_cols) > 0):
+                    pid, sid = re.match(r'P(\d+)S(\d+)', os.path.basename(csv_path).split('.')[0]).groups()
+                    angle = self.dt[(self.dt['pid'] == int(pid)) & (self.dt['sid'] == int(sid))]['angle'].values[0]
+                    goal_deg_map = {0: -45.0, 1: -90.0, 2: -135.0}
+                    goal_loc_map = {0: (150, -150), 1: (0, -150), 2: (-150, -150)}
+                    # ensure required columns exist
+                    if 'Ped_Location_x_smoothed' in cols and 'Ped_Location_y_smoothed' in cols and 'rot_z' in cols:
+                        dist_x = goal_loc_map[angle][0] - df.Ped_Location_x_smoothed.values
+                        dist_y = goal_loc_map[angle][1] - df.Ped_Location_y_smoothed.values
+                        dist_vals = np.sqrt(dist_x ** 2 + dist_y ** 2)[idxs]
+                        angle_vals = (goal_deg_map[angle] - df.rot_z.values)[idxs]
+                        goal_ts = np.concatenate([dist_vals[:, None], np.sin(angle_vals[:, None]), np.cos(angle_vals[:, None])], axis=1).astype(np.float32)
+                    else:
+                        goal_ts = None
             else:
                 pose = sampled[:, :min(6, sampled.shape[1])] if sampled.shape[1] >= 1 else None
                 gaze = sampled[:, :min(2, sampled.shape[1])] if sampled.shape[1] >= 2 else None
@@ -466,3 +491,48 @@ def split_person_groups(annotation_path, seed=42, ratios=(6, 1, 3)):
         'test_persons': test_persons,
     }
 
+
+def split_person_testing(annotation_path):
+    """Split persons into train/val/test groups by person-level splitting with given ratios.
+    Returns dict with keys 'train','val','test' -> index lists and 'persons' lists.
+    """
+    # get all feat_ids
+    with open(annotation_path, "r") as f:
+        raw = json.load(f)
+    feat_ids = [entry['video_uid'] for entry in raw]
+
+    # extract person id per sample
+    persons_per_sample = [parse_person_from_feat_id(x) for x in feat_ids]
+    unique_persons = sorted([p for p in set(persons_per_sample) if p is not None])
+    if len(unique_persons) == 0:
+        raise ValueError('No person ids found in feat_id to perform group split')
+
+    # do a statistics to show the data distribution
+    # person_counts = {p: 0 for p in unique_persons}
+    # for p in persons_per_sample:
+    #     if p in person_counts:
+    #         person_counts[p] += 1
+    # print('Person sample counts:')
+    # for p, count in person_counts.items():
+    #     print(f'  {p}: {count}')
+
+    train_persons = unique_persons
+    val_persons = unique_persons
+    test_persons = unique_persons
+    print('Split persons:')
+    print(f'  train ({len(train_persons)}): {train_persons}')
+    print(f'  val   ({len(val_persons)}): {val_persons}')
+    print(f'  test  ({len(test_persons)}): {test_persons}')
+
+    idx_train = [i for i, p in enumerate(persons_per_sample) if p in train_persons]
+    idx_val = [i for i, p in enumerate(persons_per_sample) if p in val_persons]
+    idx_test = [i for i, p in enumerate(persons_per_sample) if p in test_persons]
+
+    return {
+        'train_idx': np.array(idx_train, dtype=int),
+        'val_idx': np.array(idx_val, dtype=int),
+        'test_idx': np.array(idx_test, dtype=int),
+        'train_persons': train_persons,
+        'val_persons': val_persons,
+        'test_persons': test_persons,
+    }

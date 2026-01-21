@@ -55,6 +55,13 @@ class SlimFusionTransformer(nn.Module):
         self.motion_proj = nn.Linear(self.motion_dim, self.d_model) if self.motion_dim > 0 else None
         self.goal_proj = nn.Linear(self.goal_dim, self.d_model) if self.goal_dim > 0 else None
 
+        # LayerNorms applied after each projection
+        self.visual_ln = nn.LayerNorm(self.d_model) if self.visual_proj is not None else None
+        self.pose_ln = nn.LayerNorm(self.d_model) if self.pose_proj is not None else None
+        self.gaze_ln = nn.LayerNorm(self.d_model) if self.gaze_proj is not None else None
+        self.motion_ln = nn.LayerNorm(self.d_model) if self.motion_proj is not None else None
+        self.goal_ln = nn.LayerNorm(self.d_model) if self.goal_proj is not None else None
+
         # learned per-modality bias embeddings
         self.modality_emb = nn.ParameterDict()
         if self.visual_proj is not None:
@@ -89,12 +96,16 @@ class SlimFusionTransformer(nn.Module):
             nn.Sigmoid(),
         )
 
-        # classification head
+        # classification head (deeper)
         self.cls_token = nn.Parameter(torch.zeros(1, 1, self.d_model))
         self.classifier = nn.Sequential(
             nn.LayerNorm(self.d_model),
+            nn.Linear(self.d_model, self.d_model),
+            nn.GELU(),
+            nn.Dropout(dropout),
             nn.Linear(self.d_model, max(16, self.d_model // 2)),
-            nn.ReLU(inplace=True),
+            nn.GELU(),
+            nn.Dropout(dropout),
             nn.Linear(max(16, self.d_model // 2), n_classes),
         )
 
@@ -144,6 +155,9 @@ class SlimFusionTransformer(nn.Module):
             # flatten H,W,C
             v = v.view(B, T, -1)
         v_emb = self.visual_proj(v) if self.visual_proj is not None else v
+        # apply layernorm if configured
+        if self.visual_ln is not None:
+            v_emb = self.visual_ln(v_emb)
         if 'vis' in self.modality_emb:
             v_emb = v_emb + self.modality_emb['vis']
 
@@ -154,14 +168,20 @@ class SlimFusionTransformer(nn.Module):
         cross_sources = []
         if head_pose is not None and self.pose_proj is not None:
             p_emb = self.pose_proj(head_pose)
+            if self.pose_ln is not None:
+                p_emb = self.pose_ln(p_emb)
             p_emb = p_emb + self.modality_emb.get('pose', 0.0)
             cross_sources.append(p_emb)
         if motion is not None and self.motion_proj is not None:
             m_emb = self.motion_proj(motion)
+            if self.motion_ln is not None:
+                m_emb = self.motion_ln(m_emb)
             m_emb = m_emb + self.modality_emb.get('motion', 0.0)
             cross_sources.append(m_emb)
         if gaze is not None and self.gaze_proj is not None:
             g_emb = self.gaze_proj(gaze)
+            if self.gaze_ln is not None:
+                g_emb = self.gaze_ln(g_emb)
             g_emb = g_emb + self.modality_emb.get('gaze', 0.0)
             cross_sources.append(g_emb)
 
@@ -186,6 +206,8 @@ class SlimFusionTransformer(nn.Module):
         # 4) Adaptive goal conditioning: mix fused with goal embedding per timestep using learned gate
         if goal is not None and self.goal_proj is not None:
             g_emb = self.goal_proj(goal)
+            if self.goal_ln is not None:
+                g_emb = self.goal_ln(g_emb)
             g_emb = g_emb + self.modality_emb.get('goal', 0.0)
             Uhat = self.gate_net(fused)  # (B, T, 1)
             fused = (1.0 - Uhat) * fused + Uhat * g_emb

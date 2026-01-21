@@ -74,6 +74,13 @@ class EgocentricFusionTransformer(nn.Module):
 		self.motion_proj = nn.Linear(motion_dim, d_model) if motion_dim > 0 else None
 		self.goal_proj = nn.Linear(goal_dim, d_model) if goal_dim > 0 else None
 
+		# LayerNorms applied after each modality projection (helps stability)
+		self.visual_ln = nn.LayerNorm(d_model) if visual_dim > 0 else None
+		self.pose_ln = nn.LayerNorm(d_model) if pose_dim > 0 else None
+		self.gaze_ln = nn.LayerNorm(d_model) if gaze_dim > 0 else None
+		self.motion_ln = nn.LayerNorm(d_model) if motion_dim > 0 else None
+		self.goal_ln = nn.LayerNorm(d_model) if goal_dim > 0 else None
+
 		# learned temporal positional embeddings (shared across modalities)
 		self.max_time_steps = max_time_steps
 		self.pos_emb = nn.Parameter(torch.zeros(1, max_time_steps, d_model))
@@ -99,8 +106,18 @@ class EgocentricFusionTransformer(nn.Module):
 		)
 		self.transformer = nn.TransformerEncoder(encoder_layer, num_layers=num_layers)
 
-		# classification head
+		# classification head (deeper)
+		# pool_norm normalizes pooled representation before classifier
 		self.pool_norm = nn.LayerNorm(d_model)
+		# self.classifier = nn.Sequential(
+		# 	nn.Linear(d_model, d_model),
+		# 	nn.GELU(),
+		# 	nn.Dropout(dropout),
+		# 	nn.Linear(d_model, max(d_model // 2, 32)),
+		# 	nn.GELU(),
+		# 	nn.Dropout(dropout),
+		# 	nn.Linear(max(d_model // 2, 32), n_classes),
+		# )
 		self.classifier = nn.Sequential(
 			nn.Linear(d_model, d_model // 2),
 			nn.GELU(),
@@ -127,6 +144,7 @@ class EgocentricFusionTransformer(nn.Module):
 		if self.goal_proj is not None:
 			nn.init.xavier_normal_(self.goal_proj.weight)
 			nn.init.constant_(self.goal_proj.bias, 0.0)
+		# LayerNorms do not require special weight init (have weight=1,bias=0 by default)
 		nn.init.normal_(self.pos_emb, mean=0.0, std=0.02)
 		nn.init.normal_(self.modality_emb, mean=0.0, std=0.02)
 		if self.cls_token is not None:
@@ -165,6 +183,8 @@ class EgocentricFusionTransformer(nn.Module):
 
 		# visual tokens
 		v = self.visual_proj(visual_feats)  # B, T, d_model
+		if self.visual_ln is not None:
+			v = self.visual_ln(v)
 		v = v + self.pos_emb[:, :T, :]
 		tokens.append(v)
 		token_types.append(torch.zeros(1, 1, dtype=torch.long, device=v.device))
@@ -172,6 +192,8 @@ class EgocentricFusionTransformer(nn.Module):
 		# pose tokens
 		if (self.pose_proj is not None) and (head_pose is not None):
 			p = self.pose_proj(head_pose)
+			if self.pose_ln is not None:
+				p = self.pose_ln(p)
 			p = p + self.pos_emb[:, :T, :]
 			tokens.append(p)
 			token_types.append(torch.ones(1, 1, dtype=torch.long, device=p.device))
@@ -179,6 +201,8 @@ class EgocentricFusionTransformer(nn.Module):
 		# gaze tokens
 		if (self.gaze_proj is not None) and (gaze is not None):
 			g = self.gaze_proj(gaze)
+			if self.gaze_ln is not None:
+				g = self.gaze_ln(g)
 			g = g + self.pos_emb[:, :T, :]
 			tokens.append(g)
 			token_types.append(2 * torch.ones(1, 1, dtype=torch.long, device=g.device))
@@ -186,6 +210,8 @@ class EgocentricFusionTransformer(nn.Module):
 		# motion tokens
 		if (self.motion_proj is not None) and (motion is not None):
 			m = self.motion_proj(motion)
+			if self.motion_ln is not None:
+				m = self.motion_ln(m)
 			m = m + self.pos_emb[:, :T, :]
 			tokens.append(m)
 			token_types.append(3 * torch.ones(1, 1, dtype=torch.long, device=m.device))
@@ -193,6 +219,8 @@ class EgocentricFusionTransformer(nn.Module):
 		# goal tokens
 		if (self.goal_proj is not None) and (goal is not None):
 			g_goal = self.goal_proj(goal)
+			if self.goal_ln is not None:
+				g_goal = self.goal_ln(g_goal)
 			g_goal = g_goal + self.pos_emb[:, :T, :]
 			tokens.append(g_goal)
 			token_types.append(4 * torch.ones(1, 1, dtype=torch.long, device=g_goal.device))
@@ -299,6 +327,7 @@ class CLIPBackbone(nn.Module):
 
 		dev = device or torch.device("cpu")
 		self.model, _ = clip.load(model_name, device=dev, jit=False)
+		self.model = self.model.float()
 		# set train/eval according to freeze
 		if freeze:
 			for p in self.model.parameters():

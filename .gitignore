@@ -3,6 +3,7 @@ data/videoclips/
 data/videoframes/
 data/vrdata/
 .vscode/
+outputs/
 
 *.mp4 
 .DS_Store
