@@ -16,11 +16,13 @@ import datetime
 import tempfile
 import shutil
 import json
+import copy 
 import subprocess
 
 # optional optuna import for hyperparameter tuning
 try:
     import optuna
+    from optuna.exceptions import TrialPruned
 except Exception:
     optuna = None
 
@@ -139,20 +141,40 @@ def train(
     work_dir: Optional[str] = None,
 ) -> Dict[str, Any]:
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    # torch.cuda.set_per_process_memory_fraction(0.8, device=0)
 
     # timestamp for this run (used for saving model + logs)
     timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
     log_lines = []
+    log_fh = None
     seed_everything(args.seed)
 
+    n_classes = int(config.get('n_classes', 5))
+
     def _log(msg: str):
-        # print and accumulate for saving later
-        print(msg)
+        # print and also stream to the run log file (if available) in real time
         try:
-            log_lines.append(str(msg))
+            s = str(msg)
+        except Exception:
+            s = repr(msg)
+        print(s)
+        try:
+            log_lines.append(s)
+        except Exception:
+            pass
+        try:
+            if log_fh is not None:
+                log_fh.write(s + "\n")
+                log_fh.flush()
         except Exception:
             pass
     
+    def _save_ckpt(best_state):
+        if run_dir is not None and best_state is not None:
+            ckpt = os.path.join(run_dir, f"best_fusion.pt")
+            torch.save({"state_dict": best_state, "config": config, "timestamp": timestamp}, ckpt)
+            _log(f"  Saved best model to {ckpt}")
+
     _log("Starting training with config:")
     # _log(json.dumps(config, indent=4))
     _log(json.dumps(config, separators=(",", ":"), sort_keys=True))
@@ -175,11 +197,17 @@ def train(
                 json.dump(config, f, indent=4)
         except Exception:
             pass
+        # open a streaming log file so _log can write in real time
+        try:
+            log_path = os.path.join(run_dir, 'training_log.txt')
+            # open in append mode so repeated runs don't clobber previous logs
+            log_fh = open(log_path, 'a', encoding='utf-8', buffering=1)
+        except Exception:
+            log_fh = None
 
     # dataset selection and visual encoder
     dataset_type = config.get("dataset_type", "synthetic")
-    visual_encoder = config.get("visual_encoder", config.get("use_backbone", "pixels"))
-    # visual_encoder in {"pixels","simple","clip"}
+    visual_encoder = config.get("visual_encoder", -1)
     if visual_encoder not in ("pixels", "simple", "clip"):
         raise ValueError("visual_encoder must be one of 'pixels','simple','clip'")
     if dataset_type == "vr":
@@ -188,8 +216,10 @@ def train(
         # import split_person_groups lazily so scripts that only use synthetic data
         # don't require OpenCV/pandas at module import time
         from training.vr_dataset import split_person_groups, split_person_testing
-        data_split = split_person_groups(config["annotations_path"], config.get('seed'))
-        # data_split = split_person_testing(config["annotations_path"])
+        if args.debugging: 
+            data_split = split_person_testing(config["annotations_path"])
+        else:
+            data_split = split_person_groups(config["annotations_path"], config.get('seed'))
 
         train_ds = VRDataset(
             annotations_path=config["annotations_path"],
@@ -234,8 +264,11 @@ def train(
         # visual_dim is flattened frame size (H*W*3)
         if visual_encoder == "pixels":
             visual_dim = train_ds.frame_size[0] * train_ds.frame_size[1] * 3
-        else:
+        elif visual_encoder == 'simple':
             visual_dim = config.get("backbone_out_dim", 256)
+        elif visual_encoder == 'clip':
+            # CLIP output dim depends on model; default ViT-B/32 has 512-dim embeddings
+            visual_dim = config.get("backbone_out_dim", 512)
         # train_ds[0] -> (vis, pose, gaze, motion, label)
         pose_dim = config.get("pose_dim", train_ds[0][1].shape[1] if train_ds[0][1].numel() > 0 else 0)
         gaze_dim = config.get("gaze_dim", train_ds[0][2].shape[1] if train_ds[0][2].numel() > 0 else 0)
@@ -250,7 +283,7 @@ def train(
             gaze_dim=config.get("gaze_dim", 2),
             motion_dim=config.get("motion_dim", 2),
             goal_dim=config.get("goal_dim", 3),
-            n_classes=config.get("n_classes", 5),
+            n_classes=n_classes,
             seed=config.get("seed", 0),
         )
         collate = synth_collate
@@ -315,7 +348,7 @@ def train(
             num_layers=config.get("num_layers", 4),
             dim_feedforward=config.get("dim_feedforward", 512),
             dropout=config.get("dropout", 0),
-            n_classes=config.get("n_classes", 5),
+            n_classes=n_classes,
             max_time_steps=config.get("max_time_steps", 64),
         ).to(device)
     elif model_type == "slim":
@@ -329,13 +362,28 @@ def train(
             num_layers=config.get("num_layers", 3),
             dim_feedforward=config.get("dim_feedforward", 256),
             dropout=config.get("dropout", 0.1),
-            n_classes=config.get("n_classes", 5),
+            n_classes=n_classes,
             max_time_steps=config.get("max_time_steps", 64),
             predict_future_steps=config.get("predict_future_steps", 0),
         ).to(device)
     else:
         raise ValueError(f"Unknown model type: {model_type}")
     _log(model)
+
+    # Print parameter counts for the model (trainable vs total) before training
+    try:
+        def _count_params(module):
+            return int(sum(p.numel() for p in module.parameters() if p.requires_grad))
+
+        def _count_total_params(module):
+            return int(sum(p.numel() for p in module.parameters()))
+
+        model_trainable = _count_params(model)
+        model_total = _count_total_params(model)
+        _log(f"Model parameters: {model_trainable} trainable / {model_total} total")
+    except Exception:
+        # don't fail training if counting params throws for some custom module
+        _log("Model parameter counting failed")
 
     # optional backbone for raw frames: SimpleCNN or CLIP
     backbone = None
@@ -349,6 +397,24 @@ def train(
             raise RuntimeError("CLIPBackbone not available; ensure 'clip' package is installed or CLIP wrapper is present")
         backbone = CLIPBackbone(model_name=config.get("clip_model", "ViT-B/32"), device=device, freeze=config.get("freeze_clip", False))
 
+    # Log backbone and combined parameter counts (if backbone exists)
+    try:
+        if backbone is not None:
+            def _count_params(module):
+                return int(sum(p.numel() for p in module.parameters() if p.requires_grad))
+
+            def _count_total_params(module):
+                return int(sum(p.numel() for p in module.parameters()))
+
+            backbone_trainable = _count_params(backbone)
+            backbone_total = _count_total_params(backbone)
+            model_trainable = int(sum(p.numel() for p in model.parameters() if p.requires_grad))
+            combined_trainable = model_trainable + backbone_trainable
+            _log(f"Backbone parameters: {backbone_trainable} trainable / {backbone_total} total")
+            _log(f"Combined trainable parameters (model + backbone): {combined_trainable}")
+    except Exception:
+        _log("Backbone parameter counting failed")
+
     if backbone is not None:
         optimizer = torch.optim.AdamW(list(model.parameters()) + list(backbone.parameters()), lr=config.get("lr", 1e-4), weight_decay=1e-4)
     else:
@@ -356,7 +422,6 @@ def train(
     scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=10, gamma=0.5)
 
     # compute class weights from the training set to handle class imbalance
-    n_classes = int(config.get('n_classes', 5))
     counts = np.zeros(n_classes, dtype=np.int64)
     try:
         for _vis, _pose, _gaze, _motion, _goal, labels in train_loader:
@@ -379,6 +444,7 @@ def train(
         weights[counts == 0] = 0.0
     # weights = [3.4, 1.0]
     _log(f"weights: {weights}")
+    _log(f'Labeling map: {train_ds.label_map}' )
     weights = torch.tensor(weights, dtype=torch.float32)
     loss_fn = nn.CrossEntropyLoss(weight=weights.to(device))
 
@@ -393,8 +459,11 @@ def train(
     best_monitored_value = -1.0
 
     epochs = int(config.get("epochs", 3))
-    patience = int(config.get('early_stop_patience', 20))
+    no_improvement_patience = int(config.get('early_stop_patience', 20))
     epochs_since_improve = 0
+    # additional stopper: if neither val_acc nor val_macrof1 change for this many epochs, stop
+    no_change_patience = no_improvement_patience // 2 + 1
+    epochs_since_no_change = 0
 
     for epoch in range(1, epochs + 1):
         model.train()
@@ -423,7 +492,6 @@ def train(
             running_loss += float(loss.item()) * labels.size(0)
             running_samples += labels.size(0)
 
-
             scheduler.step()
             train_loss = running_loss / running_samples
 
@@ -433,9 +501,10 @@ def train(
         # choose which metric to use for model selection and early stopping
         if monitored_metric in ("acc", "accuracy"):
             current_monitored = float(val_acc)
-        else:
-            # 'macro_f1' expected
+        elif monitored_metric in ("macrof1", "macro_f1"):
             current_monitored = float(val_macrof1)
+        else:
+            raise ValueError(f"Unknown monitored metric: {monitored_metric}")
 
         # always update secondary tracked metrics for reporting
         if val_acc > best_val_acc:
@@ -447,22 +516,25 @@ def train(
         if current_monitored > best_monitored_value:
             best_monitored_value = current_monitored
             best_epoch = epoch
-            best_state = model.state_dict()
+            best_state = copy.deepcopy(model.state_dict())
+            _save_ckpt(best_state)
             epochs_since_improve = 0
         else:
             epochs_since_improve += 1
+        
+        if current_monitored != best_monitored_value:
+            epochs_since_no_change = 0
+        else:
+            epochs_since_no_change += 1
 
-        if epochs_since_improve >= patience:
-            _log(f"Early stopping: no improvement for {patience} epochs (stopping at epoch {epoch})")
+        if epochs_since_improve >= no_improvement_patience:
+            _log(f"Early stopping: no improvement for {no_improvement_patience} epochs (stopping at epoch {epoch})")
+            break
+        if epochs_since_no_change >= no_change_patience:
+            _log(f"Early stopping: no change in val_acc or val_macrof1 for {no_change_patience} epochs (stopping at epoch {epoch})")
             break
 
-    _log(f"Finished training. **best_val_{monitored_metric}**= {best_monitored_value:.4f} at epoch {best_epoch}")
-
-    # save best model
-    if run_dir is not None and best_state is not None:
-        ckpt = os.path.join(run_dir, f"best_fusion.pt")
-        torch.save({"state_dict": best_state, "config": config, "timestamp": timestamp}, ckpt)
-        _log(f"Saved best model to {ckpt}")
+    _log(f"\nFinished training. \nbest_val_{monitored_metric}= {best_monitored_value:.4f} at epoch {best_epoch}")
 
     # Evaluate on test set. If we have a saved best_state, load it for final evaluation.
     if best_state is not None:
@@ -473,6 +545,7 @@ def train(
             pass
 
     # evaluate test metrics
+    val_loss, val_acc, val_macrof1, val_metrics = evaluate(model, val_loader, device, backbone=backbone, loss_fn=loss_fn)
     test_loss, test_acc, test_macrof1, test_metrics = evaluate(model, test_loader, device, backbone=backbone, loss_fn=loss_fn)
     _log(f"\nTest: test_loss={test_loss:.4f}, test_acc={test_acc:.4f}, test_macrof1={test_macrof1:.4f}")
 
@@ -516,6 +589,12 @@ def train(
     # save training log
     if run_dir is not None:
         try:
+            # if we have an open streaming log file, close it before writing the final copy
+            try:
+                if log_fh is not None:
+                    log_fh.close()
+            except Exception:
+                pass
             log_path = os.path.join(run_dir, f"training_log.txt")
             with open(log_path, "w") as f:
                 for l in log_lines:
@@ -553,8 +632,8 @@ def parse_args():
 
     parser.add_argument("--work-dir", type=str, default="./outputs")
     parser.add_argument("--dataset-type", type=str, default="vr", choices=["synthetic", "vr"]) 
-    parser.add_argument("--annotations", type=str, default='../data/features/annotations.VRmulti_test_close.json', help="Path to annotations JSON for VR dataset")
-    parser.add_argument("--n-classes", type=int, default=2, help="Number of classes")
+    parser.add_argument("--debugging", type=bool, default=True, help="If set, run a quick sample training for debugging")
+    parser.add_argument("--annotations_path", type=str, default='../data/features/annotations.VRmulti_test_close.json', help="Path to annotations JSON for VR dataset")
     parser.add_argument("--videos-dir", type=str, default='../data/vrvideo_256/clips', help="Root directory of video clips for VR dataset")
     parser.add_argument("--vrdata-dir", type=str, default='../data/vrdata', help="Directory with per-video CSVs for head pose/gaze")
     
@@ -563,28 +642,25 @@ def parse_args():
     
     parser.add_argument("--backbone-out-dim", type=int, default=256, help="Output embedding dim of backbone per frame")
     parser.add_argument("--backbone-hidden", type=int, default=64, help="Hidden channels for small CNN backbone")
-    # TODO: model=clip option still fails
     parser.add_argument("--clip-model", type=str, default="ViT-B/32", help="CLIP model name to load if --visual-encoder clip")
     parser.add_argument("--freeze-clip", action="store_true", default=True, help="Freeze CLIP backbone weights")
     
-    parser.add_argument("--no-extra-modalities", action="store_true", default=True, help="Disable pose/gaze/motion/goal modalities and use only egocentric video") 
+    parser.add_argument("--no-extra-modalities", action="store_true", default=False, help="Disable pose/gaze/motion/goal modalities and use only egocentric video") 
+    parser.add_argument("--motion-cols", type=str, nargs="*", default=["Ped_Location_x_smoothed","Ped_Location_y_smoothed"], help="CSV columns for past body-frame motion")
     parser.add_argument("--pose-cols", type=str, nargs="*", default=["rot_x","rot_y","rot_z"], help="CSV columns for head pose")
     parser.add_argument("--gaze-cols", type=str, nargs="*", default=["px_u","px_v"], help="CSV columns for gaze")
-    parser.add_argument("--motion-cols", type=str, nargs="*", default=["Ped_Location_x_smoothed","Ped_Location_y_smoothed"], help="CSV columns for past body-frame motion")
     parser.add_argument("--goal-cols", type=str, nargs="*", default=["goal"], help="CSV columns for goal location") 
     parser.add_argument("--motion-dim", type=int, default=2, help="Dimensionality of motion features per timestep")
     
-    parser.add_argument("--model", type=str, default="fusion", choices=["fusion", "slim"], help="Which model to use: 'fusion' (original) or 'slim' (lightweight)")
+    parser.add_argument("--model", type=str, default="slim", choices=["fusion", "slim"], help="Which model to use: 'fusion' (original) or 'slim' (lightweight)")
     parser.add_argument("--early-stop-patience", type=int, default=20, help="Early stopping patience in epochs (default 20)")
     parser.add_argument("--eval-metric", type=str, default="macro_f1", choices=["acc", "macro_f1"], help="Evaluation metric to monitor for model selection and early stopping")
     
     # Optuna hyperparameter tuning flags
-    parser.add_argument("--hp-tune", action="store_true", default=True, help="Run Optuna hyperparameter tuning instead of a single training run")
+    parser.add_argument("--hp-tune", action="store_true", default=False, help="Run Optuna hyperparameter tuning instead of a single training run")
     parser.add_argument("--hp-trials", type=int, default=100, help="Number of Optuna trials to run")
     parser.add_argument("--hp-keep-checkpoints", action="store_true", help="Keep per-trial checkpoints/artifacts (default: remove them)")
-    parser.add_argument("--hp-dashboard", action="store_true", default=True, help="Launch optuna-dashboard for live visualization (requires optuna-dashboard installed)")
-    parser.add_argument("--hp-dashboard-port", type=int, default=8080, help="Port for optuna-dashboard (default 8080)")
-    parser.add_argument("--hp-dashboard-host", type=str, default="127.0.0.1", help="Host for optuna-dashboard (default 127.0.0.1)")
+    parser.add_argument("--optuna_url", type=str, default="sqlite:///db.sqlite2", help="Optuna storage URL (default: local SQLite file db.sqlite)")
     
     return parser.parse_args()
 
@@ -604,6 +680,32 @@ def run_optuna(base_cfg: Dict[str, Any], args) -> Optional[object]:
     base_work = base_cfg.get('work_dir') or args.work_dir or os.getcwd()
     study_dir = os.path.join(base_work, f"{study_ts}_optuna")
     os.makedirs(study_dir, exist_ok=True)
+    # streaming optuna log
+    optuna_log_fh = None
+    try:
+        optuna_log_path = os.path.join(study_dir, 'optuna_log.txt')
+        optuna_log_fh = open(optuna_log_path, 'a', encoding='utf-8', buffering=1)
+    except Exception:
+        optuna_log_fh = None
+
+    def _optuna_log(msg: str):
+        try:
+            s = str(msg)
+        except Exception:
+            s = repr(msg)
+        print(s)
+        try:
+            if optuna_log_fh is not None:
+                optuna_log_fh.write(s + "\n")
+                optuna_log_fh.flush()
+        except Exception:
+            pass
+
+    def _remove_log_file(log_dir):
+        if os.path.exists(log_dir):
+            shutil.rmtree(log_dir)
+            print(f"Removed log file: {log_dir}")
+
 
     def _objective(trial) -> float:
         cfg = dict(base_cfg)
@@ -627,18 +729,18 @@ def run_optuna(base_cfg: Dict[str, Any], args) -> Optional[object]:
         else:
             cfg['dim_feedforward'] = int(cfg['d_model'] * 4)
         cfg['dropout'] = float(trial.suggest_float('dropout', 0.0, 0.3))
-        cfg['batch_size'] = int(trial.suggest_categorical('batch_size', [16, 32, 64]))
-        resize_size = int(trial.suggest_categorical('resize_size', [32, 64, 128, 224]))
-        cfg['frame_size'] = (resize_size, resize_size)
-
-        # keep trials short and small dataset size
-        cfg['epochs'] = args.epochs
-        if args.dataset_type == 'synthetic':
-            cfg['num_samples'] = int(min(base_cfg.get('num_samples', 500), 400))
-        cfg['seed'] = args.seed
+        cfg['batch_size'] = int(trial.suggest_categorical('batch_size', [8, 16, 32, 64]))
 
         cfg['T'] = trial.suggest_categorical('T', [8, 16, 30, 60])
+        cfg['model'] = trial.suggest_categorical('model', ['fusion', 'slim'])
         cfg['visual_encoder'] = args.visual_encoder
+
+        if args.visual_encoder != 'clip':
+            resize_size = int(trial.suggest_categorical('resize_size', [32, 64, 128, 224]))
+        else: 
+            resize_size = 224  # CLIP default
+        cfg['frame_size'] = (resize_size, resize_size)
+
         if args.visual_encoder != 'pixels':
             if args.visual_encoder == 'simple':
                 cfg['backbone_out_dim'] = int(trial.suggest_int('backbone_out_dim', 64, 256))
@@ -646,8 +748,11 @@ def run_optuna(base_cfg: Dict[str, Any], args) -> Optional[object]:
             elif args.visual_encoder == 'clip':
                 cfg['clip_model'] = args.clip_model
                 cfg['freeze_clip'] = args.freeze_clip
-
-        cfg['model'] = trial.suggest_categorical('model', ['fusion', 'slim'])
+                cfg['backbone_out_dim'] = 512  # assuming ViT-B/32
+                cfg['backbone_hidden'] = int(trial.suggest_int('backbone_hidden', 32, 128))
+        else:
+            cfg['backbone_out_dim'] = None
+            cfg['backbone_hidden'] = None
 
         # create a per-trial directory under the study dir so that all logs
         # and checkpoints from trials are retained in a single timestamped
@@ -656,36 +761,51 @@ def run_optuna(base_cfg: Dict[str, Any], args) -> Optional[object]:
         trial_dir = os.path.join(study_dir, 'trials', f"trial_{trial.number}")
         os.makedirs(trial_dir, exist_ok=True)
         cfg['_no_timestamp_dir'] = True
-        try:
-            result = train(cfg, work_dir=trial_dir)
-            # capture metrics for Optuna reporting and later analysis
-            # prefer the new 'best_monitored' key (monitored metric), fall back to best_val_acc
-            val_score = float(result.get('best_monitored', result.get('best_val_acc', 0.0)))
-            # attach these to trial user attrs
-            try:
-                # record the metric that was monitored for this trial
-                trial.set_user_attr('monitored_metric', result.get('monitored_metric', cfg.get('eval_metric', 'acc')))
-                trial.set_user_attr('val_acc', float(result.get('val_acc', 0.0)))
-                trial.set_user_attr('val_macrof1', result.get('val_macrof1', 0.0))
-                trial.set_user_attr('test_acc', float(result.get('test_acc', 0.0)))
-                trial.set_user_attr('test_macrof1', result.get('test_macrof1', 0.0))
-            except Exception:
-                pass
-        except Exception as e:  # pragma: no cover - avoid crashing the study
-            print(f"Trial crashed: {e}")
-            val_score = 0.0
-        finally:
-            # do not remove trial_dir; we keep all artifacts inside study_dir
-            # so the user can inspect them after tuning.
-            pass
 
-        return val_score
+        max_attempts = 2  # 最多尝试两次
+        error = None
+        for _ in range(max_attempts):
+            try:
+                result = train(cfg, work_dir=trial_dir)
+                # capture metrics for Optuna reporting and later analysis
+                # prefer the new 'best_monitored' key (monitored metric), fall back to best_val_acc
+                val_score = float(result.get('best_monitored', -1))
+                # attach these to trial user attrs
+                # record the metric that was monitored for this trial
+                trial.set_user_attr('monitored_metric', result.get('monitored_metric', -1))
+                trial.set_user_attr('val_acc', float(result.get('val_acc', -1)))
+                trial.set_user_attr('val_macrof1', result.get('val_macrof1', -1))
+                trial.set_user_attr('test_acc', float(result.get('test_acc', -1)))
+                trial.set_user_attr('test_macrof1', result.get('test_macrof1', -1))
+                
+                return val_score
+            except Exception as e:  # pragma: no cover - avoid crashing the study
+                _optuna_log(f"Trial crashed: {e}")
+                error = e
+                val_score = -1
+                _optuna_log("Retrying the trial...")
+                continue  # retry
+        _remove_log_file(trial_dir)
+        # 两次都失败，跳过这个 trial
+        raise TrialPruned(f'Trial failed after {max_attempts} attempts because {error}')
 
     # use a sqlite storage so the study can be inspected with optuna-dashboard
-    storage_path = os.path.join(study_dir, 'optuna_study.db')
-    storage_url = f"sqlite:///{storage_path}"
-    sampler = optuna.samplers.TPESampler(seed=args.seed)
-    study = optuna.create_study(direction='maximize', sampler=sampler, storage=storage_url, load_if_exists=True, study_name='egocentric')
+    
+    def get_feat_indicators(args):
+        feats_indicators = []
+        feats_indicators.append('1') if args.motion_cols != [] else feats_indicators.append('0')
+        feats_indicators.append('1') if args.pose_cols != [] else feats_indicators.append('0')
+        feats_indicators.append('1') if args.gaze_cols != [] else feats_indicators.append('0')
+        feats_indicators.append('1') if args.goal_cols != [] else feats_indicators.append('0')
+        return ''.join(feats_indicators)
+    
+    study = optuna.create_study(
+        storage=args.optuna_url, 
+        load_if_exists=True, 
+        direction='maximize',
+        study_name=f'egocentric_{args.cls_type}_{args.visual_encoder}_{get_feat_indicators(args)}'
+    )
+    print(f"Optuna study created. Study name: {study.study_name}, storage: {args.optuna_url}")
 
     # initialize with a good start
     initial_params = {
@@ -701,45 +821,13 @@ def run_optuna(base_cfg: Dict[str, Any], args) -> Optional[object]:
         'backbone_hidden': 64,
         'backbone_out_dim': 256,
     }
+    if args.visual_encoder == 'clip' and args.clip_model == 'ViT-B/32':
+        initial_params['resize_size'] = 224
+        initial_params['backbone_out_dim'] = 512
     study.enqueue_trial(initial_params)
 
-    # optionally launch optuna-dashboard for live visualization
-    dashboard_proc = None
-    if getattr(args, 'hp_dashboard', False):
-        # prefer the optuna-dashboard executable if available
-        dashboard_cmd = shutil.which('optuna-dashboard')
-        if dashboard_cmd is None:
-            dashboard_cmd = shutil.which('optuna_dashboard')
-        if dashboard_cmd is None:
-            _msg = "optuna-dashboard binary not found in PATH; please install optuna-dashboard to use --hp-dashboard"
-            print(_msg)
-            try:
-                with open(os.path.join(study_dir, 'dashboard_info.txt'), 'w') as f:
-                    f.write(_msg + "\n")
-            except Exception:
-                pass
-        else:
-            host = getattr(args, 'hp_dashboard_host', '127.0.0.1')
-            port = int(getattr(args, 'hp_dashboard_port', 8080))
-            cmd = [dashboard_cmd, storage_url, '--host', host, '--port', str(port)]
-            logf = open(os.path.join(study_dir, 'dashboard.log'), 'w')
-            try:
-                dashboard_proc = subprocess.Popen(cmd, stdout=logf, stderr=logf)
-                with open(os.path.join(study_dir, 'dashboard_info.txt'), 'w') as f:
-                    f.write(f"dashboard_pid: {dashboard_proc.pid}\n")
-                    f.write(f"url: http://{host}:{port}/\n")
-            except Exception as e:
-                print(f"Failed to launch optuna-dashboard: {e}")
-
-    try:
-        study.optimize(_objective, n_trials=args.hp_trials)
-    finally:
-        # if we launched a dashboard process, terminate it now
-        if dashboard_proc is not None:
-            try:
-                dashboard_proc.terminate()
-            except Exception:
-                pass
+    _optuna_log(f"Starting Optuna study optimization with n_trials={args.hp_trials}")
+    study.optimize(_objective, n_trials=args.hp_trials, catch=())  # catch all exceptions to avoid study crashes
 
     # save best params and trials into study_dir
     best = study.best_trial
@@ -803,12 +891,43 @@ def run_optuna(base_cfg: Dict[str, Any], args) -> Optional[object]:
     except Exception:
         pass
 
-    print(f"Optuna study finished. Best value: {best.value}, params: {best.params}. Artifacts in {study_dir}")
+    _optuna_log(f"Optuna study finished. Best value: {best.value}, params: {best.params}. Artifacts in {study_dir}")
+    try:
+        if optuna_log_fh is not None:
+            optuna_log_fh.close()
+    except Exception:
+        pass
     return study
 
 
 if __name__ == "__main__":
     args = parse_args()
+
+    if args.debugging:
+        # reduce epochs and samples for quick debugging
+        args.epochs = 50
+        args.T = 8
+        args.num_samples = 50
+        args.batch_size = 8
+        args.frame_size = (32, 32)
+        args.annotations_path = '../data/features/annotations.VRbin_testing_close.json'
+        args.hp_trials = 4
+
+    if args.visual_encoder == 'clip' and args.clip_model == 'ViT-B/32':
+        # ViT-B/32 performs with 224x224 input, output dim 512
+        args.frame_size = (224, 224)
+        args.backbone_out_dim = 512
+
+    if 'bin' in args.annotations_path: 
+        args.n_classes = 2
+        args.cls_type = 'bin'
+    elif 'multi' in args.annotations_path:
+        args.n_classes = 5
+        args.cls_type = 'multi'
+    else:
+        raise ValueError("Cannot infer number of classes from annotations filename; please specify binary or multi-class in the filename.")
+
+
     cfg = {
         "seed": args.seed,
         "epochs": args.epochs,
@@ -818,7 +937,7 @@ if __name__ == "__main__":
         "d_model": args.d_model,
         "lr": args.lr,
         "dataset_type": args.dataset_type,
-        "annotations_path": args.annotations,
+        "annotations_path": args.annotations_path,
         "videos_dir": args.videos_dir,
         "vrdata_dir": args.vrdata_dir,
         "frame_size": tuple(args.frame_size),
@@ -835,6 +954,7 @@ if __name__ == "__main__":
         "model": args.model,
         "eval_metric": args.eval_metric,
         "n_classes": args.n_classes,
+        "cls_type": args.cls_type,
         "early_stop_patience": args.early_stop_patience,
     }
     if args.hp_tune:

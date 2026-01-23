@@ -325,8 +325,10 @@ class VRDataset(Dataset):
                         dist_x = goal_loc_map[angle][0] - df.Ped_Location_x_smoothed.values
                         dist_y = goal_loc_map[angle][1] - df.Ped_Location_y_smoothed.values
                         dist_vals = np.sqrt(dist_x ** 2 + dist_y ** 2)[idxs]
-                        angle_vals = (goal_deg_map[angle] - df.rot_z.values)[idxs]
-                        goal_ts = np.concatenate([dist_vals[:, None], np.sin(angle_vals[:, None]), np.cos(angle_vals[:, None])], axis=1).astype(np.float32)
+                        angle_vals = (goal_deg_map[angle] - df.rot_z.values)[idxs] # in degrees
+                        goal_ts = np.concatenate([
+                            dist_vals[:, None], np.sin(np.deg2rad(angle_vals[:, None])), np.cos(np.deg2rad(angle_vals[:, None]))
+                            ], axis=1).astype(np.float32) # np.sin/cos takes radians instead of degrees
                     else:
                         goal_ts = None
             else:
@@ -362,7 +364,7 @@ class VRDataset(Dataset):
 
         visual = self._read_frames(video_path, start, end)
         pose, gaze, motion, goal_ts = self._read_vr_csv(csv_path, start, end)
-        # TODO: identify and fill the missing values in eye gaze sequences 
+        # the current gaze on screen is already linearly interpolated during data preparation
         # apply optional scalers (fit on training set only)
         def _apply_scaler(arr, scaler):
             if arr is None or scaler is None:

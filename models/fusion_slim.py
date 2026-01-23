@@ -100,13 +100,10 @@ class SlimFusionTransformer(nn.Module):
         self.cls_token = nn.Parameter(torch.zeros(1, 1, self.d_model))
         self.classifier = nn.Sequential(
             nn.LayerNorm(self.d_model),
-            nn.Linear(self.d_model, self.d_model),
+            nn.Linear(self.d_model, self.d_model // 2),
             nn.GELU(),
             nn.Dropout(dropout),
-            nn.Linear(self.d_model, max(16, self.d_model // 2)),
-            nn.GELU(),
-            nn.Dropout(dropout),
-            nn.Linear(max(16, self.d_model // 2), n_classes),
+            nn.Linear(self.d_model // 2, n_classes),
         )
 
         # optional future prediction head
