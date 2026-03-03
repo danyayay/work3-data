@@ -1,8 +1,7 @@
-data/rawvideos/
-data/videoclips/
-data/videoframes/
+data/videodata/
 data/vrdata/
 .vscode/
+outputs/
 
 *.mp4 
 .DS_Store
