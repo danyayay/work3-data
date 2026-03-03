@@ -5,20 +5,27 @@ import pandas as pd
 import subprocess
 
 
-def get_video_metadata(raw_video_dir):
-    videofilenames = [f for f in os.listdir(raw_video_dir) if f.endswith('.mp4')]
-    csvfilenames = [f.rstrip('.csv') for f in os.listdir(f'{raw_video_dir}/video_metadata/') if f.endswith('.csv')]
+def get_video_metadata(videodata_dir):
+    video_raw_dir = f'{videodata_dir}/videoraw'
+    video_metadata_dir = f'{videodata_dir}/video_metadata'
+    videofilenames = [f for f in os.listdir(video_raw_dir) if f.endswith('.mp4')]
+    csvfilenames = [f.rstrip('.csv') for f in os.listdir(video_metadata_dir) if f.endswith('.csv')]
     for filename in videofilenames:
-        filename = filename.strip('.mp4')
-        source_video_filepath = f"{raw_video_dir}/{filename}.mp4"
-        source_csv_filepath = f"{raw_video_dir}/video_metadata/{filename}.csv"
-        if filename in csvfilenames:
-            print(f"Video metadata for {source_video_filepath} already exists at {source_csv_filepath}, skipping extraction.")
-        else:
-            subprocess.run(f"ffprobe -select_streams v:0 -show_frames -print_format csv {source_video_filepath} > {source_csv_filepath}", shell=True)
-        # ffprobe -select_streams v:0 -show_frames -print_format csv data/videoclips/P1/P1S1.mp4 > data/P1S1_meta.csv
+        if filename.startswith('P24'):
+            filename = filename.replace('.mp4', '')
+            source_video_filepath = f"{video_raw_dir}/{filename}.mp4"
+            source_csv_filepath = f"{video_metadata_dir}/{filename}.csv"
+            if filename in csvfilenames:
+                print(f"Video metadata for {source_video_filepath} already exists at {source_csv_filepath}, skipping extraction.")
+            else:
+                subprocess.run(f"ffprobe -select_streams v:0 -show_frames -print_format csv {source_video_filepath} > {source_csv_filepath}", shell=True)
+            # ffprobe -select_streams v:0 -show_frames -print_format csv data/videoclips/P1/P1S1.mp4 > data/P1S1_meta.csv
 
-def get_trial_metadata(raw_video_dir, source_video_name, vr_data_dir, pid, start, forward=None, start_sid=None):
+def get_trial_metadata(videodata_dir, source_video_name, vr_data_dir, pid, start, forward=None, start_sid=None):
+    trial_metadata_dir = f'{videodata_dir}/trial_metadata'
+    if not os.path.exists(trial_metadata_dir):
+        os.makedirs(trial_metadata_dir)
+
     vr_file = glob.glob(f"{vr_data_dir}/P{pid}_*")
     vr_df = pd.read_csv(vr_file[0])
 
@@ -28,9 +35,14 @@ def get_trial_metadata(raw_video_dir, source_video_name, vr_data_dir, pid, start
     sids = [int(i) for i in vr_df['Scenario'].unique() if not i.startswith('F')]
     sids = [sid for sid in sids if sid in vr_df_final['sid'].unique()]
     sids.sort()
-    if start_sid is not None:
-        sids = sids[sids.index(start_sid):]
     print(sids)
+    if start_sid is not None:
+        if start_sid in sids:
+            sids = sids[sids.index(start_sid):]
+        else:
+            pd.DataFrame([]).to_csv(f"{trial_metadata_dir}/{source_video_name}.csv", index=False)
+            return None
+    print(vr_file[0], sids)
     
     # find the timeelapsed point for each trial
     time_df = pd.DataFrame(columns=['sid', 'start', 'start_abs', 'end_abs', 'start_rel', 'end_rel', 'start_time', 'end_time'])
@@ -52,13 +64,15 @@ def get_trial_metadata(raw_video_dir, source_video_name, vr_data_dir, pid, start
                     'start_rel': start_sid - time_df.iloc[0]['start_abs'], 
                     'end_rel': end_sid - time_df.iloc[0]['start_abs']}
             time_df = pd.concat([time_df, pd.DataFrame([line])], ignore_index=True)
-    if not os.path.exists(f"{raw_video_dir}/trial_metadata"):
-        os.makedirs(f"{raw_video_dir}/trial_metadata")
-    time_df.to_csv(f"{raw_video_dir}/trial_metadata/{source_video_name}.csv", index=False)
+    time_df.to_csv(f"{trial_metadata_dir}/{source_video_name}.csv", index=False)
 
 
-def extract_video_clips(raw_video_dir, video_clip_dir, pid):
-    df_tms = pd.read_csv(f'{raw_video_dir}/trial_metadata/P{pid}.csv')
+def extract_video_clips(videodata_dir, pid):
+    video_raw_dir = f'{videodata_dir}/videoraw'
+    trial_metadata_dir = f'{videodata_dir}/trial_metadata'
+    video_clip_dir = f'{videodata_dir}/videoclips'
+
+    df_tms = pd.read_csv(f'{trial_metadata_dir}/P{pid}.csv')
     files = df_tms['file'].unique()
 
     for source_video_name in files:
@@ -78,7 +92,7 @@ def extract_video_clips(raw_video_dir, video_clip_dir, pid):
             command = [
                 "ffmpeg",
                 "-y",
-                "-i", f'{raw_video_dir}/videos/{source_video_name}.mp4',
+                "-i", f'{video_raw_dir}/{source_video_name}.mp4',
                 "-ss", str(start_time),
                 "-to", str(end_time), 
                 output_path
@@ -123,7 +137,7 @@ def extract_video_frames_from_clips(videoclip_dir, videoclip_name, videoframe_di
     cap.release()
     return frames
 
-    
+
 # for pid in pids:
 #     # get the frame file for time mapping
 #     subprocess.run(f"ffprobe -select_streams v:0 -show_frames -print_format csv {raw_video_dir}P{pid}.mp4 > {raw_video_dir}frames/frames_{pid}.csv", shell=True)
@@ -176,15 +190,16 @@ if __name__ == "__main__":
     # pids = [1, 2, 3, 6, 7, 8, 13, 19, 22, 28, 32, 35, 42, 43, 45]
     # pids = [1, 13, 22]
 
-    raw_video_dir = 'data/rawvideos'
-    video_clip_dir = 'data/videoclips'
-    video_frame_dir = 'data/videoframes'
+    videodata_dir = 'data/videodata'
+    raw_video_dir = f'{videodata_dir}/videoraw'
+    video_clip_dir = f'{videodata_dir}/videoclips'
+    video_frame_dir = f'{videodata_dir}/videoframes'
     vr_data_dir = 'data/vrdata/combined'
 
-    # first extract video metadata if not already done
-    # get_video_metadata(raw_video_dir)
+    # Step 1: extract video metadata if not already done
+    # get_video_metadata(videodata_dir)
 
-    # second prepare the trial metadata files and finally extract the video clips
+    # Step 2: prepare the trial metadata files and finally extract the video clips for each participant
     # source_video_name = 'P1'
     # pid = 1
     # start = 299.124300
@@ -327,3 +342,288 @@ if __name__ == "__main__":
     # start = 11.092767 
     # get_trial_metadata(raw_video_dir, source_video_name, vr_data_dir, pid=pid, start=start, start_sid=10)
     # extract_video_clips(raw_video_dir, video_clip_dir, pid=pid) 
+
+    # pid = 14
+    # source_video_name = 'P14-1'
+    # start = 307.845900
+    # get_trial_metadata(videodata_dir, source_video_name, vr_data_dir, pid=pid, start=start)
+    # source_video_name = 'P14-2'
+    # start = 14.583367
+    # get_trial_metadata(videodata_dir, source_video_name, vr_data_dir, pid=pid, start=start, start_sid=11)
+    # extract_video_clips(videodata_dir, pid=pid)
+
+    # pid = 15
+    # source_video_name = f'P{pid}-1'
+    # start = 292.140233
+    # get_trial_metadata(videodata_dir, source_video_name, vr_data_dir, pid=pid, start=start, start_sid=2 ,forward={11: 1})
+    # source_video_name = f'P{pid}-2'
+    # start = 8.673833
+    # get_trial_metadata(videodata_dir, source_video_name, vr_data_dir, pid=pid, start=start, start_sid=1)
+    # source_video_name = f'P{pid}-3_2'
+    # start = 6.452367
+    # get_trial_metadata(videodata_dir, source_video_name, vr_data_dir, pid=pid, start=start, start_sid=3)
+    # extract_video_clips(videodata_dir, pid=pid)
+
+    # pid = 16
+    # source_video_name = f'P{pid}-2'
+    # start = 14.818367
+    # get_trial_metadata(videodata_dir, source_video_name, vr_data_dir, pid=pid, start=start)
+    # extract_video_clips(videodata_dir, pid=pid)
+
+    # pid = 17
+    # source_video_name = f'P{pid}-1'
+    # start = 154.268433
+    # get_trial_metadata(videodata_dir, source_video_name, vr_data_dir, pid=pid, start=start)
+    # source_video_name = f'P{pid}-2'
+    # start = 10.036567
+    # get_trial_metadata(videodata_dir, source_video_name, vr_data_dir, pid=pid, start=start, start_sid=4)
+    # source_video_name = f'P{pid}-3'
+    # start = 9.647033
+    # get_trial_metadata(videodata_dir, source_video_name, vr_data_dir, pid=pid, start=start, start_sid=12)
+    # extract_video_clips(videodata_dir, pid=pid)
+
+    # pid = 18
+    # source_video_name = f'P{pid}-1'
+    # start = 327.468200
+    # get_trial_metadata(videodata_dir, source_video_name, vr_data_dir, pid=pid, start=start)
+    # source_video_name = f'P{pid}-2'
+    # start = 18.903600
+    # get_trial_metadata(videodata_dir, source_video_name, vr_data_dir, pid=pid, start=start, start_sid=2)
+    # source_video_name = f'P{pid}-3'
+    # start = 15.816233
+    # get_trial_metadata(videodata_dir, source_video_name, vr_data_dir, pid=pid, start=start, start_sid=11)
+    # extract_video_clips(videodata_dir, pid=pid)
+
+    # pid = 20
+    # source_video_name = f'P{pid}-1'
+    # start = 176.558567
+    # get_trial_metadata(videodata_dir, source_video_name, vr_data_dir, pid=pid, start=start)
+    # source_video_name = f'P{pid}-2'
+    # start = 9.426767
+    # get_trial_metadata(videodata_dir, source_video_name, vr_data_dir, pid=pid, start=start, start_sid=3)
+    # extract_video_clips(videodata_dir, pid=pid)
+
+    # pid = 23
+    # source_video_name = f'P{pid}-1'
+    # start = 426.457600
+    # get_trial_metadata(videodata_dir, source_video_name, vr_data_dir, pid=pid, start=start, start_sid=3)
+    # source_video_name = f'P{pid}-2'
+    # start = 16.735767
+    # get_trial_metadata(videodata_dir, source_video_name, vr_data_dir, pid=pid, start=start, start_sid=1)
+    # extract_video_clips(videodata_dir, pid=pid)
+
+    # pid = 24
+    # source_video_name = f'P{pid}-1'
+    # start = 238.837267
+    # get_trial_metadata(videodata_dir, source_video_name, vr_data_dir, pid=pid, start=start, start_sid=1)
+    # source_video_name = f'P{pid}-2'
+    # start = 11.202767
+    # get_trial_metadata(videodata_dir, source_video_name, vr_data_dir, pid=pid, start=start, start_sid=2)
+    # source_video_name = f'P{pid}-3'
+    # start = 14.375333
+    # get_trial_metadata(videodata_dir, source_video_name, vr_data_dir, pid=pid, start=start, start_sid=8)
+    # extract_video_clips(videodata_dir, pid=pid)
+
+    # pid = 25
+    # source_video_name = f'P{pid}-1'
+    # start = 309.954467
+    # get_trial_metadata(videodata_dir, source_video_name, vr_data_dir, pid=pid, start=start, start_sid=1)
+    # source_video_name = f'P{pid}-2'
+    # start = 22.629300
+    # get_trial_metadata(videodata_dir, source_video_name, vr_data_dir, pid=pid, start=start, start_sid=12)
+    # extract_video_clips(videodata_dir, pid=pid)
+
+    # pid = 26
+    # source_video_name = f'P{pid}-1'
+    # start = 216.165533
+    # get_trial_metadata(videodata_dir, source_video_name, vr_data_dir, pid=pid, start=start, start_sid=1, forward={9: 1})
+    # source_video_name = f'P{pid}-2'
+    # start = 36.183833
+    # get_trial_metadata(videodata_dir, source_video_name, vr_data_dir, pid=pid, start=start, start_sid=3)
+    # source_video_name = f'P{pid}-4'
+    # start = 16.319733
+    # get_trial_metadata(videodata_dir, source_video_name, vr_data_dir, pid=pid, start=start, start_sid=10)
+    # extract_video_clips(videodata_dir, pid=pid)
+
+    # pid = 27
+    # source_video_name = f'P{pid}-1'
+    # start = 414.873100
+    # get_trial_metadata(videodata_dir, source_video_name, vr_data_dir, pid=pid, start=start, start_sid=1)
+    # source_video_name = f'P{pid}-2'
+    # start = 19.459000
+    # get_trial_metadata(videodata_dir, source_video_name, vr_data_dir, pid=pid, start=start, start_sid=5)
+    # source_video_name = f'P{pid}-3'
+    # start = 10.146233
+    # get_trial_metadata(videodata_dir, source_video_name, vr_data_dir, pid=pid, start=start, start_sid=7)
+    # extract_video_clips(videodata_dir, pid=pid)
+
+    # pid = 29
+    # source_video_name = f'P{pid}-1'
+    # start = 16.317267
+    # get_trial_metadata(videodata_dir, source_video_name, vr_data_dir, pid=pid, start=start, start_sid=2)
+    # source_video_name = f'P{pid}-2'
+    # start = 26.548400
+    # get_trial_metadata(videodata_dir, source_video_name, vr_data_dir, pid=pid, start=start, start_sid=1)
+    # source_video_name = f'P{pid}-3'
+    # start = 21.322500
+    # get_trial_metadata(videodata_dir, source_video_name, vr_data_dir, pid=pid, start=start, start_sid=7)
+    # extract_video_clips(videodata_dir, pid=pid)
+
+    # pid = 30
+    # source_video_name = f'P{pid}-1'
+    # start = 294.868267
+    # get_trial_metadata(videodata_dir, source_video_name, vr_data_dir, pid=pid, start=start, start_sid=1)
+    # source_video_name = f'P{pid}-2'
+    # start = 13.375100
+    # get_trial_metadata(videodata_dir, source_video_name, vr_data_dir, pid=pid, start=start, start_sid=10)
+    # extract_video_clips(videodata_dir, pid=pid)
+
+    # pid = 31
+    # source_video_name = f'P{pid}-1'
+    # start = 317.929633
+    # get_trial_metadata(videodata_dir, source_video_name, vr_data_dir, pid=pid, start=start, start_sid=4)
+    # source_video_name = f'P{pid}-2'
+    # start = 15.348967
+    # get_trial_metadata(videodata_dir, source_video_name, vr_data_dir, pid=pid, start=start, start_sid=1)
+    # extract_video_clips(videodata_dir, pid=pid)
+
+    # pid = 33
+    # source_video_name = f'P{pid}-2'
+    # start = 140.100733
+    # get_trial_metadata(videodata_dir, source_video_name, vr_data_dir, pid=pid, start=start, start_sid=1)
+    # extract_video_clips(videodata_dir, pid=pid)
+
+    # pid = 36
+    # source_video_name = f'P{pid}-1'
+    # start = 372.657400
+    # get_trial_metadata(videodata_dir, source_video_name, vr_data_dir, pid=pid, start=start, start_sid=2)
+    # source_video_name = f'P{pid}-2'
+    # start = 18.097600
+    # get_trial_metadata(videodata_dir, source_video_name, vr_data_dir, pid=pid, start=start, start_sid=1)
+    # source_video_name = f'P{pid}-3'
+    # start = 7.752900
+    # get_trial_metadata(videodata_dir, source_video_name, vr_data_dir, pid=pid, start=start, start_sid=11)
+    # extract_video_clips(videodata_dir, pid=pid)
+
+    # pid = 37
+    # source_video_name = f'P{pid}-1'
+    # start = 337.6622
+    # get_trial_metadata(videodata_dir, source_video_name, vr_data_dir, pid=pid, start=start, start_sid=1)
+    # source_video_name = f'P{pid}-2'
+    # start = 16.396567
+    # get_trial_metadata(videodata_dir, source_video_name, vr_data_dir, pid=pid, start=start, start_sid=2)
+    # source_video_name = f'P{pid}-3'
+    # start = 11.3998
+    # get_trial_metadata(videodata_dir, source_video_name, vr_data_dir, pid=pid, start=start, start_sid=8)
+    # source_video_name = f'P{pid}-4'
+    # start = 14.817767
+    # get_trial_metadata(videodata_dir, source_video_name, vr_data_dir, pid=pid, start=start, start_sid=12)
+    # extract_video_clips(videodata_dir, pid=pid)
+
+    # pid = 38
+    # source_video_name = f'P{pid}-1'
+    # start = 388.081767
+    # get_trial_metadata(videodata_dir, source_video_name, vr_data_dir, pid=pid, start=start, start_sid=1)
+    # source_video_name = f'P{pid}-2'
+    # start = 16.1754
+    # get_trial_metadata(videodata_dir, source_video_name, vr_data_dir, pid=pid, start=start, start_sid=11)
+    # extract_video_clips(videodata_dir, pid=pid)
+
+    # pid = 39
+    # source_video_name = f'P{pid}-1'
+    # start = 331.723033
+    # get_trial_metadata(videodata_dir, source_video_name, vr_data_dir, pid=pid, start=start, start_sid=2)
+    # source_video_name = f'P{pid}-2'
+    # start = 10.476433
+    # get_trial_metadata(videodata_dir, source_video_name, vr_data_dir, pid=pid, start=start, start_sid=1)
+    # source_video_name = f'P{pid}-3'
+    # start = 16.985067
+    # get_trial_metadata(videodata_dir, source_video_name, vr_data_dir, pid=pid, start=start, start_sid=4)
+    # source_video_name = f'P{pid}-4_2'
+    # start = 12.985433
+    # get_trial_metadata(videodata_dir, source_video_name, vr_data_dir, pid=pid, start=start, start_sid=11)
+    # extract_video_clips(videodata_dir, pid=pid)
+    
+    # pid = 40
+    # source_video_name = f'P{pid}-1'
+    # start = 238.646
+    # get_trial_metadata(videodata_dir, source_video_name, vr_data_dir, pid=pid, start=start)
+    # source_video_name = f'P{pid}-2'
+    # start = 9.670833
+    # get_trial_metadata(videodata_dir, source_video_name, vr_data_dir, pid=pid, start=start, start_sid=4)
+    # source_video_name = f'P{pid}-3'
+    # start = 23.264067
+    # get_trial_metadata(videodata_dir, source_video_name, vr_data_dir, pid=pid, start=start, start_sid=9, forward={11:1})
+    # extract_video_clips(videodata_dir, pid=pid)
+
+    # pid = 44
+    # source_video_name = f'P{pid}-1'
+    # start = 295.3165
+    # get_trial_metadata(videodata_dir, source_video_name, vr_data_dir, pid=pid, start=start, forward={2: 20})
+    # source_video_name = f'P{pid}-2'
+    # start = 44.082067
+    # get_trial_metadata(videodata_dir, source_video_name, vr_data_dir, pid=pid, start=start, start_sid=4, forward={7:2})
+    # extract_video_clips(videodata_dir, pid=pid)
+
+    # pid = 46
+    # source_video_name = f'P{pid}-1'
+    # start = 347.5002
+    # get_trial_metadata(videodata_dir, source_video_name, vr_data_dir, pid=pid, start=start, start_sid=2)
+    # source_video_name = f'P{pid}-2'
+    # start = 26.766067
+    # get_trial_metadata(videodata_dir, source_video_name, vr_data_dir, pid=pid, start=start, start_sid=1)
+    # source_video_name = f'P{pid}-3'
+    # start = 17.426
+    # get_trial_metadata(videodata_dir, source_video_name, vr_data_dir, pid=pid, start=start, start_sid=5)
+    # source_video_name = f'P{pid}-5'
+    # start = 12.875767
+    # get_trial_metadata(videodata_dir, source_video_name, vr_data_dir, pid=pid, start=start, start_sid=11)
+    # extract_video_clips(videodata_dir, pid=pid)
+
+    # pid = 47
+    # source_video_name = f'P{pid}-2'
+    # start = 16.625967
+    # get_trial_metadata(videodata_dir, source_video_name, vr_data_dir, pid=pid, start=start, forward={4:1})
+    # source_video_name = f'P{pid}-3_2'
+    # start = 13.6794
+    # get_trial_metadata(videodata_dir, source_video_name, vr_data_dir, pid=pid, start=start, start_sid=12)
+    # extract_video_clips(videodata_dir, pid=pid)
+
+    # pid = 48
+    # source_video_name = f'P{pid}-2'
+    # start = 38.553933
+    # get_trial_metadata(videodata_dir, source_video_name, vr_data_dir, pid=pid, start=start, start_sid=2)
+    # extract_video_clips(videodata_dir, pid=pid)
+
+    # pid = 49
+    # source_video_name = f'P{pid}-2'
+    # start = 20.8231
+    # get_trial_metadata(videodata_dir, source_video_name, vr_data_dir, pid=pid, start=start)
+    # source_video_name = f'P{pid}-3'
+    # start = 17.259267
+    # get_trial_metadata(videodata_dir, source_video_name, vr_data_dir, pid=pid, start=start, start_sid=7)
+    # extract_video_clips(videodata_dir, pid=pid)
+
+    # pid = 50
+    # source_video_name = f'P{pid}-1'
+    # start = 336.050767
+    # get_trial_metadata(videodata_dir, source_video_name, vr_data_dir, pid=pid, start=start)
+    # source_video_name = f'P{pid}-2'
+    # start = 22.849
+    # get_trial_metadata(videodata_dir, source_video_name, vr_data_dir, pid=pid, start=start, start_sid=6)
+    # extract_video_clips(videodata_dir, pid=pid)
+
+    # pid = 51 
+    # source_video_name = f'P{pid}-1'
+    # start = 394.807333
+    # get_trial_metadata(videodata_dir, source_video_name, vr_data_dir, pid=pid, start=start)
+    # source_video_name = f'P{pid}-2'
+    # start = 17.180067
+    # get_trial_metadata(videodata_dir, source_video_name, vr_data_dir, pid=pid, start=start, start_sid=3)
+    # source_video_name = f'P{pid}-3'
+    # start = 17.294267
+    # get_trial_metadata(videodata_dir, source_video_name, vr_data_dir, pid=pid, start=start, start_sid=10)
+    # source_video_name = f'P{pid}-4'
+    # start = 16.403
+    # get_trial_metadata(videodata_dir, source_video_name, vr_data_dir, pid=pid, start=start, start_sid=12)
+    # extract_video_clips(videodata_dir, pid=pid)
