@@ -95,3 +95,13 @@ python -m training.train_fusion --annotations '../data/features/annotations.VRbi
 * Step 3: Extract the trial metadata for each video, using `get_trial_metadata` function in `extract_videoclips.py` 
 * Step 4: Manually combine all trial metadata for each participant
 * Step 5: Extract videclips based on trial metadata `extract_video_frames_from_clips` function in `extract_videoclips.py` 
+
+
+### Prepare VR+video data in general
+
+* `utils/preprocessing_basic.py`: filter out the familiarization phase, and filter out trials with basic errors (e.g., bad signals)
+* `utils.align_vrdata2clip.py`: align the logged VR data to the video frequency
+* `utils.preprocessing_advanced.py`: preprocessing all columns through interpolation, ...
+* `utils/filtering.py`: check whether there are a lot of silence in each trial
+
+### Prepare GroundVQA features

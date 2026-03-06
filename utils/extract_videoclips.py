@@ -242,7 +242,7 @@ if __name__ == "__main__":
     # pid = 13
     # start = 229.027867
     # get_trial_metadata(raw_video_dir, source_video_name, vr_data_dir, pid=pid, start=start, forward={6: 1})
-    # extract_video_clips(raw_video_dir, video_clip_dir, pid=pid)
+    # extract_video_clips(videodata_dir, pid=pid)
 
     # source_video_name = 'P19'
     # pid = 19
@@ -331,17 +331,17 @@ if __name__ == "__main__":
     # get_trial_metadata(raw_video_dir, source_video_name, vr_data_dir, pid=pid, start=start, start_sid=3)
     # extract_video_clips(raw_video_dir, video_clip_dir, pid=pid) 
 
-    # pid = 12
+    # pid = 12 
     # source_video_name = 'P12-1'
     # start = 428.708967
-    # get_trial_metadata(raw_video_dir, source_video_name, vr_data_dir, pid=pid, start=start, start_sid=3)
+    # get_trial_metadata(videodata_dir, source_video_name, vr_data_dir, pid=pid, start=start, start_sid=3)
     # source_video_name = 'P12-2'
     # start = 46.168967
-    # get_trial_metadata(raw_video_dir, source_video_name, vr_data_dir, pid=pid, start=start, start_sid=2)
+    # get_trial_metadata(videodata_dir, source_video_name, vr_data_dir, pid=pid, start=start, start_sid=2)
     # source_video_name = 'P12-3'
-    # start = 11.092767 
-    # get_trial_metadata(raw_video_dir, source_video_name, vr_data_dir, pid=pid, start=start, start_sid=10)
-    # extract_video_clips(raw_video_dir, video_clip_dir, pid=pid) 
+    # start = 11.092767
+    # get_trial_metadata(videodata_dir, source_video_name, vr_data_dir, pid=pid, start=start, start_sid=10)
+    # extract_video_clips(videodata_dir, pid=pid)
 
     # pid = 14
     # source_video_name = 'P14-1'

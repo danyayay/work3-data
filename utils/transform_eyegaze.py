@@ -101,6 +101,7 @@ def project_LH_pure(Pw, Cw, yaw_deg, pitch_deg, roll_deg, fx, fy, cx, cy):
 
 
 def cal_eyegaze_on_screen(df_ps):
+    df_ps = df_ps.copy()
     # eye gaze data
     Cw = df_ps[['Ped_Location_x', 'Ped_Location_y', 'Ped_Location_z']].to_numpy() / 100 # ped loc
     Pw = df_ps[['HitLocation_x', 'HitLocation_y', 'HitLocation_z']].to_numpy() / 100 # gaze hit
@@ -123,6 +124,8 @@ def cal_eyegaze_on_screen(df_ps):
     ys = []
     us = []
     vs = []
+    width_cap = 1536
+    height_cap = 1068
     for i in range(len(Cw)):
         # print(f"--- point {i} ---")
         projected = project_LH_pure(Pw[i], Cw[i], yaw_deg[i], pitch_deg[i], roll_deg[i], fx, fy, cx, cy)
@@ -131,8 +134,6 @@ def cal_eyegaze_on_screen(df_ps):
         ys.append(projected[1] if projected is not None else np.nan)
 
         if projected is not None:
-            width_cap = 1536
-            height_cap = 1068
             u_cap = width_cap - projected[0] * (width_cap / width)
             v_cap = height_cap - projected[1] * (height_cap / height)
             # print("projected in capture:", (u_cap, v_cap))
@@ -146,7 +147,11 @@ def cal_eyegaze_on_screen(df_ps):
     df_ps.loc[:, ['px_u']] = us
     df_ps.loc[:, ['px_v']] = vs
     df_ps.loc[:, ['timestamp']] = df_ps['TimeElapsed'] - df_ps['TimeElapsed'].iloc[0]
-    df_ps_new = df_ps[['timestamp', 'px_u', 'px_v']]
+    df_ps_new = df_ps[['px_u', 'px_v']]
+
+    # get rid of the outliers by clipping
+    df_ps_new.loc[:, 'px_u'] = df_ps_new['px_u'].clip(0, width_cap)
+    df_ps_new.loc[:, 'px_v'] = df_ps_new['px_v'].clip(0, height_cap)
     return df_ps_new
 
 
