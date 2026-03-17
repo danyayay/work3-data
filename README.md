@@ -99,9 +99,11 @@ python -m training.train_fusion --annotations '../data/features/annotations.VRbi
 
 ### Prepare VR+video data in general
 
-* `utils/preprocessing_basic.py`: filter out the familiarization phase, and filter out trials with basic errors (e.g., bad signals)
-* `utils.align_vrdata2clip.py`: align the logged VR data to the video frequency
-* `utils.preprocessing_advanced.py`: preprocessing all columns through interpolation, ...
-* `utils/filtering.py`: check whether there are a lot of silence in each trial
+* `utils/1preprocessing_basic.py`: filter out the familiarization phase, and filter out trials with basic errors (e.g., bad signals)
+* `utils.2align_vrdata2clip.py`: align the logged VR data to the video frequency
+* `utils.3preprocessing_advanced.py`: preprocessing all columns through interpolation, ...
+* `utils/4filtering.py`: check whether there are a lot of silence in each trial
+* `utils/5check_video_log_matchness.py`: make sure the video and log files are perfectly matched with each other
+* `utils/6prepare_csv.py`: update `dts_qn.csv` and `dfs.csv` to include only our final VR data
 
 ### Prepare GroundVQA features

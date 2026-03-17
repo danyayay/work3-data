@@ -1,8 +1,13 @@
 data/videodata/
 data/vrdata/
 data/dtdata/
+data/ego_better
+data/gaze_better
 .vscode/
 outputs/
+figures/indiv
+figures/eyegaze_visual
+results/
 
 *.mp4 
 .DS_Store

@@ -35,8 +35,8 @@ class Interaction(object):
             shutil.copy(self.video_path_from, self.video_path_to)
             print(f'No trimming needed for video, copied to {self.video_path_to}')
 
-        if hasattr(self, 'last_time'):
-            self.df.time = self.df.time - self.last_time # reset time to start from 0 after trimming
+        if hasattr(self, 'until_frame'):
+            self.df.time = self.df.time - self.df.time.iloc[0] # reset time to start from 0 after trimming
         self.save_filtered_data()
         
     def load_data(self):
@@ -87,7 +87,7 @@ class Interaction(object):
     #     return df.iloc[self.new_start_frame, 5], df.iloc[-1, 5]
 
     def trim_video_by_frame(self):
-        start_time = self.last_time if hasattr(self, 'last_time') else self.df.time.iloc[0]
+        start_time = self.df.time.iloc[0] - 0.005 # add a small buffer to ensure the trimmed video includes the first frame
         end_time = self.df.time.iloc[-1]
 
         command = [
@@ -149,7 +149,7 @@ class Interaction(object):
             idx_new = self.find_nearest_zero_velocity_before_pod_moving(df_i)
             if idx_new is not None and idx_new > 1:
                 self.until_frame = int(idx_new)
-                self.last_time = df_i.time.iloc[int(idx_new) - 1]
+                # self.last_time = df_i.time.iloc[int(idx_new)]
                 print(f'\nTrimming sid {i} at index {idx_new} (white to green - rotation)')
                 # bc of df.drop_duplicates(), there are missing index
                 self.df = self.df.drop(index=[i for i in df_i.index.to_numpy() if df_i.index[0] <= i < df_i.index[idx_new]])
@@ -162,7 +162,7 @@ class Interaction(object):
             idx_new = self.find_nearest_zero_velocity_before_pod_moving(df_i)
             if idx_new is not None and idx_new > 1:
                 self.until_frame = int(idx_new)
-                self.last_time = df_i.time.iloc[int(idx_new) - 1]
+                # self.last_time = df_i.time.iloc[int(idx_new)]
                 print(f'Trimming sid {self.sid} at index {idx_new} (white to green - starting positions)')
                 # bc of df.drop_duplicates(), there are missing index
                 self.df = self.df.drop(index=[i for i in df_i.index.to_numpy() if df_i.index[0] <= i < df_i.index[idx_new]])
@@ -171,42 +171,42 @@ class Interaction(object):
             idx_new = self.find_nearest_zero_velocity_before_pod_moving(df_i)
             if idx_new is not None and idx_new > 1:
                 self.until_frame = int(idx_new)
-                self.last_time = df_i.time.iloc[int(idx_new) - 1]
+                # self.last_time = df_i.time.iloc[int(idx_new)]
                 print('Trimming sid', self.sid, 'at index', idx_new, '(white to green - last zero velocity)')
                 self.df = self.df.drop(index=[i for i in df_i.index.to_numpy() if df_i.index[0] <= i < df_i.index[idx_new]])
         
         # based on eye gazing object
-        start_name = None
-        for c in df_i.hit_object.astype(str).unique():
-            if c != 'nan':
-                if 'start' in c:
-                    start_name = c
-                    break
-        if start_name:
-            idx_new3 = df_i[df_i.hit_object.astype(str) == start_name].index.to_numpy()
-            idx_new3_start, idx_new3_end = idx_new3[0], idx_new3[-1]
-            time_pasted = df_i.time.loc[idx_new3_end] - df_i.time.iloc[0]
-            time_remained = df_i.time.iloc[-1] - df_i.time.loc[idx_new3_start]
-            trial_start_idx = df_i.index[0]
-            if time_pasted < time_remained: # delete forward
-                idx_new3_start = None
-                # delete forward 
-                if idx_new is not None:
-                    if df_i.index[idx_new] < idx_new3_end:
-                        idx_new3_start = df_i.index[idx_new] + 1
-                else:
-                    idx_new3_start = df_i.index[0]
-                if idx_new3_start is not None and idx_new3_start > 1: 
-                    self.from_frame = int(idx_new3_start - trial_start_idx)
-                    self.to_frame = int(idx_new3_end - trial_start_idx)
-                    print('Trimming sid', self.sid, 'from', idx_new3_start-trial_start_idx, 'to', idx_new3_end-trial_start_idx, '(white to green - gazing object)')
-                    self.df = self.df.drop(index=np.arange(idx_new3_start, idx_new3_end+1).tolist())
-            else: # delete backward 
-                idx_new3_end = df_i.index[-1]
-                self.from_frame = int(idx_new3_start - trial_start_idx)
-                self.to_frame = int(idx_new3_end)
-                print('Trimming sid', self.sid, 'from', idx_new3_start-trial_start_idx, 'to the end (white to green - gazing object)')
-                self.df = self.df.drop(index=np.arange(idx_new3_start, idx_new3_end+1).tolist())
+        # start_name = None
+        # for c in df_i.hit_object.astype(str).unique():
+        #     if c != 'nan':
+        #         if 'start' in c:
+        #             start_name = c
+        #             break
+        # if start_name:
+        #     idx_new3 = df_i[df_i.hit_object.astype(str) == start_name].index.to_numpy()
+        #     idx_new3_start, idx_new3_end = idx_new3[0], idx_new3[-1]
+        #     time_pasted = df_i.time.loc[idx_new3_end] - df_i.time.iloc[0]
+        #     time_remained = df_i.time.iloc[-1] - df_i.time.loc[idx_new3_start]
+        #     trial_start_idx = df_i.index[0]
+        #     if time_pasted < time_remained: # delete forward
+        #         idx_new3_start = None
+        #         # delete forward 
+        #         if idx_new is not None:
+        #             if df_i.index[idx_new] < idx_new3_end:
+        #                 idx_new3_start = df_i.index[idx_new] + 1
+        #         else:
+        #             idx_new3_start = df_i.index[0]
+        #         if idx_new3_start is not None and idx_new3_start > 1: 
+        #             self.from_frame = int(idx_new3_start - trial_start_idx)
+        #             self.to_frame = int(idx_new3_end - trial_start_idx)
+        #             print('Trimming sid', self.sid, 'from', idx_new3_start-trial_start_idx, 'to', idx_new3_end-trial_start_idx, '(white to green - gazing object)')
+        #             self.df = self.df.drop(index=np.arange(idx_new3_start, idx_new3_end+1).tolist())
+        #     else: # delete backward 
+        #         idx_new3_end = df_i.index[-1]
+        #         self.from_frame = int(idx_new3_start - trial_start_idx)
+        #         self.to_frame = int(idx_new3_end)
+        #         print('Trimming sid', self.sid, 'from', idx_new3_start-trial_start_idx, 'to the end (white to green - gazing object)')
+        #         self.df = self.df.drop(index=np.arange(idx_new3_start, idx_new3_end+1).tolist())
     
     def remove_pod_already_left(self):
         is_there_podleader = self.df.groupby('sid')['dist_leader2center'].transform(lambda x: (x < 2000).sum() > 0)
@@ -289,7 +289,7 @@ if __name__ == '__main__':
     parser.add_argument("--vrdata_dir", type=str, default='data/vrdata')
     parser.add_argument("--dtdata_dir", type=str, default='data/dtdata')
     parser.add_argument("--psids", nargs='+', 
-                        # default=['P23S11']
+                        default=['P30S4']
                        )
     
     parser.add_argument("--videodata_dir", type=str, default='data/videodata/videoclips')
@@ -310,4 +310,3 @@ if __name__ == '__main__':
 # python -m utils.preprocessing -f P50_202511813834529 P51_2025118141418658 --suffix _noremoval > out50-51_noremoval.txt
     
 # python -m utils.preprocessing -f P1_20241217103615516 P2_202412171419360 P3_20241217152233801 P4_2024121911738427 P5_20241219132245990 P6_2024121915620772 P7_2024121915567133 P8_2024121916394796 P9_20251610917686 P10_20251613298921 P11_202516151537305 P12_202516171753723 P13_202517101430120 P14_20251711546819 P15_20251714314880 P16_202517151737922 P17_202517162823137 P18_2025171745643 P19_202519171112119 P20_202511010139902 P21_202511011150733 P22_202511013946226 P23_202511014555424 P24_202511015455563 P25_2025110161322537 P26_202511017318590 P27_202511194845442 P28_20251111384223 P29_20251111435533 P30_2025111151424898 P31_202511116142262 P32_202511395855284 P33_2025113131228931 P34_2025113135340982 P35_202511315915944 P36_20251131675773 P37_202511317103643 P38_2025114101220373 P39_20251141112424 P40_2025114131911860 P41_202511414230295 P42_202511415655706 P43_2025114162926461 P44_2025114171410580 P45_202511610513261 P46_202511611914394 P47_202511614223187 P48_2025116151043950 P49_2025116171511625 P50_202511813834529 P51_2025118141418658 2>&1 | tee out_preprocess.txt
-      

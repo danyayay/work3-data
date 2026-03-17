@@ -630,11 +630,11 @@ def parse_args():
     parser.add_argument("--d-model", type=int, default=128)
     parser.add_argument("--lr", type=float, default=1e-4)
 
-    parser.add_argument("--work-dir", type=str, default="./outputs")
+    parser.add_argument("--work-dir", type=str, default="./logs")
     parser.add_argument("--dataset-type", type=str, default="vr", choices=["synthetic", "vr"]) 
     parser.add_argument("--debugging", type=bool, default=True, help="If set, run a quick sample training for debugging")
-    parser.add_argument("--annotations_path", type=str, default='../data/features/annotations.VRmulti_test_close.json', help="Path to annotations JSON for VR dataset")
-    parser.add_argument("--videos-dir", type=str, default='../data/vrvideo_256/clips', help="Root directory of video clips for VR dataset")
+    parser.add_argument("--annotations_path", type=str, default='../features/groundvqa/annotations.VRbinary_00000_test_close.json', help="Path to annotations JSON for VR dataset")
+    parser.add_argument("--videos-dir", type=str, default='../data/videodata_256/clips', help="Root directory of video clips for VR dataset")
     parser.add_argument("--vrdata-dir", type=str, default='../data/vrdata', help="Directory with per-video CSVs for head pose/gaze")
     
     parser.add_argument("--frame-size", type=int, nargs=2, default=(32, 32), help="H W frame resize for VR dataset")
@@ -645,7 +645,7 @@ def parse_args():
     parser.add_argument("--clip-model", type=str, default="ViT-B/32", help="CLIP model name to load if --visual-encoder clip")
     parser.add_argument("--freeze-clip", action="store_true", default=True, help="Freeze CLIP backbone weights")
     
-    parser.add_argument("--no-extra-modalities", action="store_true", default=False, help="Disable pose/gaze/motion/goal modalities and use only egocentric video") 
+    parser.add_argument("--no-extra-modalities", action="store_true", default=True, help="Disable pose/gaze/motion/goal modalities and use only egocentric video") 
     parser.add_argument("--motion-cols", type=str, nargs="*", default=["Ped_Location_x_smoothed","Ped_Location_y_smoothed"], help="CSV columns for past body-frame motion")
     parser.add_argument("--pose-cols", type=str, nargs="*", default=["rot_x","rot_y","rot_z"], help="CSV columns for head pose")
     parser.add_argument("--gaze-cols", type=str, nargs="*", default=["px_u","px_v"], help="CSV columns for gaze")
